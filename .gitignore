@@ -1,0 +1,20 @@
+# Node
+node_modules/
+.next/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.pytest_cache/
+
+# Environment Variables (CRITICAL)
+.env
+.env.local
+
+# Mac/Windows System files
+.DS_Store
+Thumbs.db
