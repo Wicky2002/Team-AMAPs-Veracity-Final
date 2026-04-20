@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { ABVariantGrid } from '@/components/ABVariantGrid';
 import { CampaignTimeline } from '@/components/CampaignTimeline';
@@ -20,7 +20,11 @@ export default function Home() {
   const [status, setStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
 
   const eventSourceRef = useRef<EventSource | null>(null);
-  const threadId = useMemo(() => uuidv4(), []);
+  const [threadId, setThreadId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setThreadId(uuidv4());
+  }, []);
 
   const appendEvent = (raw: string) => {
     setEvents((prev) => [raw, ...prev].slice(0, 120));
@@ -93,6 +97,10 @@ export default function Home() {
     setMetrics([]);
     setTimeline([]);
 
+    if (!threadId) {
+      return;
+    }
+
     const params = new URLSearchParams({
       thread_id: threadId,
       message,
@@ -131,6 +139,9 @@ export default function Home() {
   };
 
   const sendAction = async (action_type: string, payload: Record<string, unknown>) => {
+    if (!threadId) {
+      return;
+    }
     await fetch('/api/loop/action', {
       method: 'POST',
       headers: {
@@ -174,7 +185,7 @@ export default function Home() {
           </button>
         </div>
         <p className="mt-2 text-xs text-zinc-500">
-          Thread: <code>{threadId}</code> • Status: <strong>{status}</strong>
+          Thread: <code>{threadId ?? 'generating...'}</code> • Status: <strong>{status}</strong>
         </p>
       </header>
 
