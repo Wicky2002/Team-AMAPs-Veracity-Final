@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useRef, useState } from 'react';
-
+import { v4 as uuidv4 } from 'uuid';
 import { ABVariantGrid } from '@/components/ABVariantGrid';
 import { CampaignTimeline } from '@/components/CampaignTimeline';
 import { ChannelIntentPicker } from '@/components/ChannelIntentPicker';
@@ -20,7 +20,7 @@ export default function Home() {
   const [status, setStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
 
   const eventSourceRef = useRef<EventSource | null>(null);
-  const threadId = useMemo(() => crypto.randomUUID(), []);
+  const threadId = useMemo(() => uuidv4(), []);
 
   const appendEvent = (raw: string) => {
     setEvents((prev) => [raw, ...prev].slice(0, 120));
