@@ -189,7 +189,10 @@ export default function Home() {
       return threadId;
     }
 
-    const generated = crypto.randomUUID();
+    const generated =
+  typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : Math.random().toString(36).substring(2) + Date.now().toString(36);
     setThreadId(generated);
     return generated;
   };
