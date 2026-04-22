@@ -10,6 +10,13 @@ from langgraph.config import get_stream_writer
 from pydantic import BaseModel, Field
 
 try:
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_ollama import ChatOllama
+except Exception:  # pragma: no cover - optional dependency guard
+    ChatPromptTemplate = None
+    ChatOllama = None
+
+try:
     import anthropic
     import instructor
 except Exception:  # pragma: no cover - optional dependency guard
@@ -38,6 +45,8 @@ _anthropic_client = None
 _anthropic_initialized = False
 _last_ollama_error: str | None = None
 _last_claude_error: str | None = None
+_ollama_chat_llm = None
+_ollama_chat_llm_config: tuple[str, str] | None = None
 
 
 def _get_anthropic_client():
@@ -78,6 +87,99 @@ def _get_ollama_config() -> tuple[str, str] | None:
         base_url = "http://127.0.0.1:11434"
 
     return base_url, model
+
+
+def _get_ollama_chat_llm(*, base_url: str, model: str):
+    global _ollama_chat_llm
+    global _ollama_chat_llm_config
+
+    if ChatOllama is None:
+        return None
+
+    config = (base_url, model)
+    if _ollama_chat_llm is None or _ollama_chat_llm_config != config:
+        _ollama_chat_llm = ChatOllama(
+            model=model,
+            base_url=base_url,
+            temperature=0.2,
+        )
+        _ollama_chat_llm_config = config
+
+    return _ollama_chat_llm
+
+
+def _extract_llm_content_text(response: Any) -> str:
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts).strip()
+
+    return str(content).strip()
+
+
+def _strip_markdown_fences(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text.startswith("```"):
+        return text
+
+    lines = text.splitlines()
+    if lines:
+        lines = lines[1:]
+
+    while lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+
+    return "\n".join(lines).strip()
+
+
+def _loads_json_object(raw: str) -> dict[str, Any]:
+    cleaned = _strip_markdown_fences(raw)
+    try:
+        payload = json.loads(cleaned)
+    except Exception:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end <= start:
+            raise
+        payload = json.loads(cleaned[start : end + 1])
+
+    if not isinstance(payload, dict):
+        raise ValueError("LLM JSON response is not an object")
+    return payload
+
+
+def _variants_from_structured_output(structured: ContentOutput) -> list[OutreachVariant]:
+    variants: list[OutreachVariant] = []
+    for item in structured.variants[:2]:
+        subject_line = item.subject_line.strip()
+        hook = item.hook.strip()
+        cta = item.cta.strip()
+        hypothesis = item.hypothesis.strip()
+        if not (subject_line and hook and cta):
+            continue
+
+        variants.append(
+            OutreachVariant(
+                subject_line=subject_line,
+                hook=hook,
+                cta=cta,
+                hypothesis=hypothesis or "Outcome-aligned framing",
+                provenance_chain=[],
+            )
+        )
+
+    return variants
 
 
 def _set_last_ollama_error(message: str | None) -> None:
@@ -435,6 +537,29 @@ Task:
 User context: {message}
 """
 
+    langchain_error: str | None = None
+    llm = _get_ollama_chat_llm(base_url=base_url, model=model)
+    if llm is not None and ChatPromptTemplate is not None:
+        try:
+            prompt_template = ChatPromptTemplate.from_messages([
+                ("user", "{prompt_text}"),
+            ])
+            response = await llm.ainvoke(prompt_template.format_messages(prompt_text=prompt))
+            raw_response = _extract_llm_content_text(response)
+            if not raw_response:
+                raise ValueError("ChatOllama returned an empty response")
+
+            parsed = _loads_json_object(raw_response)
+            structured = ContentOutput.model_validate(parsed)
+            variants = _variants_from_structured_output(structured)
+            if variants:
+                _set_last_ollama_error(None)
+                return variants
+
+            raise ValueError("ChatOllama returned variants but subject/hook/cta fields were empty")
+        except Exception as exc:
+            langchain_error = f"ChatOllama request failed: {str(exc)}"
+
     payload = {
         "model": model,
         "prompt": prompt,
@@ -447,62 +572,69 @@ User context: {message}
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
             response = await client.post(f"{base_url}/api/generate", json=payload)
     except Exception as exc:
-        _set_last_ollama_error(f"Ollama request failed: {str(exc)}")
+        message = f"Ollama request failed: {str(exc)}"
+        if langchain_error:
+            message = f"{langchain_error}; {message}"
+        _set_last_ollama_error(message)
         return None
 
     if response.status_code >= 400:
         body_preview = response.text[:220].replace("\n", " ")
-        _set_last_ollama_error(f"Ollama HTTP {response.status_code}: {body_preview}")
+        message = f"Ollama HTTP {response.status_code}: {body_preview}"
+        if langchain_error:
+            message = f"{langchain_error}; {message}"
+        _set_last_ollama_error(message)
         return None
 
     try:
         body = response.json()
     except Exception as exc:
-        _set_last_ollama_error(f"Ollama returned non-JSON response: {str(exc)}")
+        message = f"Ollama returned non-JSON response: {str(exc)}"
+        if langchain_error:
+            message = f"{langchain_error}; {message}"
+        _set_last_ollama_error(message)
         return None
 
     if not isinstance(body, dict):
-        _set_last_ollama_error("Ollama response body is not an object")
+        message = "Ollama response body is not an object"
+        if langchain_error:
+            message = f"{langchain_error}; {message}"
+        _set_last_ollama_error(message)
         return None
 
     raw_response = body.get("response")
     if not isinstance(raw_response, str) or not raw_response.strip():
-        _set_last_ollama_error("Ollama response did not include a non-empty 'response' string")
+        message = "Ollama response did not include a non-empty 'response' string"
+        if langchain_error:
+            message = f"{langchain_error}; {message}"
+        _set_last_ollama_error(message)
         return None
 
     try:
-        parsed = json.loads(raw_response)
+        parsed = _loads_json_object(raw_response)
     except Exception as exc:
-        _set_last_ollama_error(f"Ollama response was not valid JSON: {str(exc)}")
+        message = f"Ollama response was not valid JSON: {str(exc)}"
+        if langchain_error:
+            message = f"{langchain_error}; {message}"
+        _set_last_ollama_error(message)
         return None
 
     try:
         structured = ContentOutput.model_validate(parsed)
     except Exception as exc:
-        _set_last_ollama_error(f"Ollama JSON did not match schema: {str(exc)}")
+        message = f"Ollama JSON did not match schema: {str(exc)}"
+        if langchain_error:
+            message = f"{langchain_error}; {message}"
+        _set_last_ollama_error(message)
         return None
 
-    variants: list[OutreachVariant] = []
-    for item in structured.variants[:2]:
-        subject_line = item.subject_line.strip()
-        hook = item.hook.strip()
-        cta = item.cta.strip()
-        hypothesis = item.hypothesis.strip()
-        if not (subject_line and hook and cta):
-            continue
-
-        variants.append(
-            OutreachVariant(
-                subject_line=subject_line,
-                hook=hook,
-                cta=cta,
-                hypothesis=hypothesis or "Outcome-aligned framing",
-                provenance_chain=[],
-            )
-        )
+    variants = _variants_from_structured_output(structured)
 
     if not variants:
-        _set_last_ollama_error("Ollama returned variants but subject/hook/cta fields were empty")
+        message = "Ollama returned variants but subject/hook/cta fields were empty"
+        if langchain_error:
+            message = f"{langchain_error}; {message}"
+        _set_last_ollama_error(message)
         return None
 
     _set_last_ollama_error(None)
