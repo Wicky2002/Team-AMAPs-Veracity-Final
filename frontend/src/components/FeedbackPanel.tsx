@@ -62,7 +62,7 @@ export function FeedbackPanel({ metrics, onFeedback }: Props) {
       <button
         type="button"
         onClick={onFeedback}
-        className="mt-4 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-2 text-sm font-semibold text-white shadow-md transition hover:from-emerald-500 hover:to-teal-500"
+        className="mt-4 rounded-lg bg-linear-to-r from-emerald-600 to-teal-600 px-4 py-2 text-sm font-semibold text-white shadow-md transition hover:from-emerald-500 hover:to-teal-500"
       >
         Feed Results Back →
       </button>

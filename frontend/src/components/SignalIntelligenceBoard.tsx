@@ -47,7 +47,7 @@ export function SignalIntelligenceBoard({ signals }: Props) {
 
                 <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
                   <div
-                    className="h-2 rounded-full bg-gradient-to-r from-indigo-500 to-blue-500"
+                    className="h-2 rounded-full bg-linear-to-r from-indigo-500 to-blue-500"
                     style={{ width: `${confidencePct}%` }}
                   />
                 </div>

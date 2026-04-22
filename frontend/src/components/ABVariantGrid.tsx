@@ -35,7 +35,7 @@ export function ABVariantGrid({ variants, onDeploy }: Props) {
             </p>
             <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Hypothesis: {variant.hypothesis}</p>
             <button
-              className="mt-4 rounded-lg bg-gradient-to-r from-slate-900 to-indigo-700 px-3 py-2 text-sm font-semibold text-white shadow-md transition hover:from-slate-800 hover:to-indigo-600 dark:from-indigo-600 dark:to-blue-600"
+              className="mt-4 rounded-lg bg-linear-to-r from-slate-900 to-indigo-700 px-3 py-2 text-sm font-semibold text-white shadow-md transition hover:from-slate-800 hover:to-indigo-600 dark:from-indigo-600 dark:to-blue-600"
               onClick={() => onDeploy(variant)}
               type="button"
             >

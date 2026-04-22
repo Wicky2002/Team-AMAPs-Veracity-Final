@@ -200,7 +200,7 @@ export function ComparisonCard({ title, subtitle, competitors, market_insight }:
           <button
             type="button"
             onClick={() => void handleDownloadPNG()}
-            className="rounded-lg bg-gradient-to-r from-indigo-600 to-blue-600 px-3 py-1.5 text-xs font-semibold text-white shadow transition hover:from-indigo-500 hover:to-blue-500"
+            className="rounded-lg bg-linear-to-r from-indigo-600 to-blue-600 px-3 py-1.5 text-xs font-semibold text-white shadow transition hover:from-indigo-500 hover:to-blue-500"
           >
             ↓ PNG
           </button>
@@ -214,7 +214,7 @@ export function ComparisonCard({ title, subtitle, competitors, market_insight }:
               key={comp.name}
               className={`relative overflow-hidden rounded-xl p-4 ${
                 comp.highlight
-                  ? 'border-2 border-blue-500 bg-gradient-to-br from-slate-900 to-slate-800 text-slate-50 shadow-md'
+                  ? 'border-2 border-blue-500 bg-linear-to-br from-slate-900 to-slate-800 text-slate-50 shadow-md'
                   : 'border border-slate-200 bg-white text-slate-900 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100'
               }`}
             >
