@@ -5,6 +5,8 @@ export const UI_COMPONENT = {
   FEEDBACK_PANEL: 'FeedbackPanel',
   STALE_WARNING: 'StaleWarning',
   COMPARISON_CARD: 'ComparisonCard',
+  LINKEDIN_POST_GRID: 'LinkedInPostGrid',
+  CAMPAIGN_BRIEF_CARD: 'CampaignBriefCard',
 } as const;
 
 export type UIRenderComponent = (typeof UI_COMPONENT)[keyof typeof UI_COMPONENT];
@@ -23,6 +25,8 @@ const ALIAS_TO_COMPONENT: Record<string, UIRenderComponent> = {
   feedback_panel: UI_COMPONENT.FEEDBACK_PANEL,
   stale_warning: UI_COMPONENT.STALE_WARNING,
   comparison_card: UI_COMPONENT.COMPARISON_CARD,
+  linkedin_post_grid: UI_COMPONENT.LINKEDIN_POST_GRID,
+  campaign_brief_card: UI_COMPONENT.CAMPAIGN_BRIEF_CARD,
 };
 
 export const UI_COMPONENT_ALIAS_MAP: Readonly<Record<string, UIRenderComponent>> = ALIAS_TO_COMPONENT;

@@ -3,12 +3,22 @@
 import { useRef, useState } from 'react';
 
 import { ABVariantGrid } from '@/components/ABVariantGrid';
+import { CampaignBriefCard } from '@/components/CampaignBriefCard';
 import { CampaignTimeline } from '@/components/CampaignTimeline';
 import { ChannelIntentPicker } from '@/components/ChannelIntentPicker';
 import { ComparisonCard } from '@/components/ComparisonCard';
 import { FeedbackPanel } from '@/components/FeedbackPanel';
+import { LinkedInPostGrid } from '@/components/LinkedInPostGrid';
 import { SignalIntelligenceBoard } from '@/components/SignalIntelligenceBoard';
-import type { FeedbackMetric, OutreachVariant, SSEEvent, SignalReference, TimelineEntry } from '@/lib/loop-types';
+import type {
+  CampaignBrief,
+  FeedbackMetric,
+  LinkedInPost,
+  OutreachVariant,
+  SSEEvent,
+  SignalReference,
+  TimelineEntry,
+} from '@/lib/loop-types';
 import { UI_COMPONENT, normalizeUIRenderComponent } from '@/lib/ui-components';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -25,6 +35,10 @@ const toSignals = (props: Record<string, unknown>): SignalReference[] => {
       return [];
     }
 
+    const sourceType = signal.source_type;
+    const normalizedSourceType: SignalReference['source_type'] =
+      sourceType === 'competitor' || sourceType === 'audience' || sourceType === 'pestel' ? sourceType : undefined;
+
     return [
       {
         source: String(signal.source ?? 'unknown'),
@@ -32,6 +46,7 @@ const toSignals = (props: Record<string, unknown>): SignalReference[] => {
         quote: String(signal.quote ?? signal.content ?? ''),
         content: typeof signal.content === 'string' ? signal.content : undefined,
         confidence: Number(signal.confidence ?? 0.5),
+        source_type: normalizedSourceType,
       },
     ];
   });
@@ -132,6 +147,67 @@ const toTimeline = (props: Record<string, unknown>): TimelineEntry[] => {
       },
     ];
   });
+};
+
+const toLinkedInPosts = (props: Record<string, unknown>): LinkedInPost[] => {
+  const rawPosts = props.posts;
+  if (!Array.isArray(rawPosts)) {
+    return [];
+  }
+
+  return rawPosts.flatMap((post) => {
+    if (!isRecord(post)) {
+      return [];
+    }
+
+    const hashtags = Array.isArray(post.hashtags)
+      ? post.hashtags.flatMap((tag) => (typeof tag === 'string' && tag.trim() ? [tag] : []))
+      : [];
+
+    return [
+      {
+        angle: String(post.angle ?? 'general'),
+        hook: String(post.hook ?? ''),
+        body: String(post.body ?? ''),
+        cta: String(post.cta ?? ''),
+        hashtags,
+      },
+    ];
+  });
+};
+
+const toCampaignBrief = (props: Record<string, unknown>): CampaignBrief => {
+  const toStringList = (value: unknown): string[] => {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value.flatMap((item) => {
+      if (typeof item !== 'string') {
+        return [];
+      }
+
+      const trimmed = item.trim();
+      return trimmed ? [trimmed] : [];
+    });
+  };
+
+  return {
+    title: typeof props.title === 'string' && props.title.trim() ? props.title : 'Campaign Positioning Brief',
+    positioning_statement:
+      typeof props.positioning_statement === 'string' && props.positioning_statement.trim()
+        ? props.positioning_statement
+        : 'Position this campaign around measurable, signal-driven outcomes.',
+    target_audience:
+      typeof props.target_audience === 'string' && props.target_audience.trim()
+        ? props.target_audience
+        : 'Revenue leaders in B2B growth teams',
+    key_messages: toStringList(props.key_messages),
+    competitor_gaps: toStringList(props.competitor_gaps),
+    recommended_channels: toStringList(props.recommended_channels),
+    next_actions: toStringList(props.next_actions),
+    context: typeof props.context === 'string' ? props.context : undefined,
+  };
 };
 
 const isSSEEvent = (value: unknown): value is SSEEvent => {
@@ -346,17 +422,26 @@ export default function Home() {
   const renderEvent = (event: SSEEvent, index: number) => {
     if (event.type === 'node_started') {
       return (
-        <div key={`node-${index}`} className="flex items-center gap-2 px-1 py-1 text-xs text-zinc-500">
-          <span className="h-2 w-2 animate-pulse rounded-full bg-green-400" />
-          Running {event.node} — Cycle {event.cycle_n}
+        <div
+          key={`node-${index}`}
+          className="flex items-center gap-2 rounded-xl border border-slate-200/80 bg-white/75 px-3 py-2 text-xs text-slate-600 shadow-sm backdrop-blur dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-300"
+        >
+          <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
+          Running <span className="font-semibold capitalize">{event.node.replace(/_/g, ' ')}</span> — Cycle {event.cycle_n}
         </div>
       );
     }
 
     if (event.type === 'signal_found') {
       return (
-        <div key={`signal-${index}`} className="rounded-md border border-blue-200 bg-blue-50 p-2 text-xs text-blue-900">
-          <span className="font-medium">{event.source}</span>: {event.quote}
+        <div
+          key={`signal-${index}`}
+          className="rounded-xl border border-indigo-200/80 bg-linear-to-br from-indigo-50 to-white p-3 text-xs text-indigo-950 shadow-sm dark:border-indigo-500/30 dark:from-indigo-950/50 dark:to-slate-900 dark:text-indigo-100"
+        >
+          <span className="mr-1 inline-flex rounded-full border border-indigo-300/80 bg-indigo-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-900/60 dark:text-indigo-200">
+            {event.source}
+          </span>
+          {event.quote}
         </div>
       );
     }
@@ -408,7 +493,7 @@ export default function Home() {
           return (
             <div
               key={`ui-stale-${index}`}
-              className="rounded-lg border border-amber-400/30 bg-amber-50 p-3 text-sm text-amber-900"
+              className="rounded-xl border border-amber-300/70 bg-amber-50/95 p-3 text-sm text-amber-900 shadow-sm dark:border-amber-500/30 dark:bg-amber-950/50 dark:text-amber-100"
             >
               {typeof event.props.message === 'string' ? event.props.message : 'Signals may be stale.'}
             </div>
@@ -423,6 +508,17 @@ export default function Home() {
               market_insight={typeof event.props.market_insight === 'string' ? event.props.market_insight : ''}
             />
           );
+        case UI_COMPONENT.LINKEDIN_POST_GRID:
+          return (
+            <LinkedInPostGrid
+              key={`ui-linkedin-${index}`}
+              title={typeof event.props.title === 'string' ? event.props.title : 'LinkedIn Content Angles'}
+              subtitle={typeof event.props.subtitle === 'string' ? event.props.subtitle : 'Social-ready drafts'}
+              posts={toLinkedInPosts(event.props)}
+            />
+          );
+        case UI_COMPONENT.CAMPAIGN_BRIEF_CARD:
+          return <CampaignBriefCard key={`ui-brief-${index}`} brief={toCampaignBrief(event.props)} />;
         default:
           return null;
       }
@@ -430,7 +526,10 @@ export default function Home() {
 
     if (event.type === 'warning') {
       return (
-        <div key={`warning-${index}`} className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm">
+        <div
+          key={`warning-${index}`}
+          className="rounded-xl border border-amber-300/70 bg-amber-50/90 p-3 text-sm text-amber-950 shadow-sm dark:border-amber-500/30 dark:bg-amber-950/50 dark:text-amber-100"
+        >
           ⚠️ {event.message}
           {event.fallback_used && <span className="ml-2 text-xs underline">Fallback used</span>}
         </div>
@@ -439,7 +538,10 @@ export default function Home() {
 
     if (event.type === 'loop_complete') {
       return (
-        <div key={`complete-${index}`} className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+        <div
+          key={`complete-${index}`}
+          className="rounded-xl border border-emerald-300/70 bg-emerald-50/90 p-3 text-sm text-emerald-950 shadow-sm dark:border-emerald-500/30 dark:bg-emerald-950/50 dark:text-emerald-100"
+        >
           Loop complete for cycle {event.cycle_n}. Next action: {event.next_action}
         </div>
       );
@@ -449,15 +551,41 @@ export default function Home() {
   };
 
   return (
-    <main className="mx-auto flex w-full max-w-6xl flex-col gap-4 p-6">
-      <header className="rounded-xl border border-zinc-200 p-4 shadow-sm">
-        <h1 className="text-2xl font-bold">Signal → Action Skeleton</h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          Phase 1/2 scaffold: LangGraph SSE stream → FastAPI → Next.js interactive shell.
-        </p>
-        <div className="mt-3 flex flex-col gap-2 md:flex-row">
+    <main className="mx-auto flex w-full max-w-7xl flex-col gap-6 p-4 md:p-6">
+      <header className="rounded-2xl border border-slate-200/70 bg-white/75 p-5 shadow-lg shadow-slate-200/40 backdrop-blur dark:border-slate-800 dark:bg-slate-950/65 dark:shadow-none">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-600 dark:text-indigo-300">
+              Revenue Intelligence Workspace
+            </p>
+            <h1 className="mt-1 text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-50 md:text-3xl">
+              Signal → Action Command Center
+            </h1>
+            <p className="mt-2 max-w-2xl text-sm text-slate-600 dark:text-slate-300">
+              Run the market loop, compare variants, and capture performance learnings cycle by cycle.
+            </p>
+          </div>
+          <div className="inline-flex h-fit items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs shadow-sm dark:border-slate-700 dark:bg-slate-900">
+            <span className="font-medium text-slate-500 dark:text-slate-300">Status</span>
+            <span
+              className={`rounded-full px-2 py-0.5 font-semibold capitalize ${
+                status === 'running'
+                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-200'
+                  : status === 'error'
+                    ? 'bg-red-100 text-red-700 dark:bg-red-900/60 dark:text-red-200'
+                    : status === 'done'
+                      ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/60 dark:text-indigo-200'
+                      : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200'
+              }`}
+            >
+              {status}
+            </span>
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-col gap-2 md:flex-row">
           <input
-            className="flex-1 rounded-md border border-zinc-300 px-3 py-2 text-sm"
+            className="flex-1 rounded-xl border border-slate-300 bg-white/90 px-4 py-2.5 text-sm shadow-inner outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 dark:border-slate-700 dark:bg-slate-900/90 dark:focus:border-indigo-400 dark:focus:ring-indigo-900"
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             placeholder="Ask a research/generate/feedback question..."
@@ -465,38 +593,54 @@ export default function Home() {
           <button
             type="button"
             onClick={startLoop}
-            className="rounded-md bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
+            className="rounded-xl bg-linear-to-r from-indigo-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/25 transition hover:from-indigo-500 hover:to-blue-500"
           >
             Start Loop
           </button>
           <button
             type="button"
             onClick={stopLoop}
-            className="rounded-md border border-zinc-300 px-4 py-2 text-sm hover:bg-zinc-50"
+            className="rounded-xl border border-slate-300 bg-white/90 px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
           >
             Stop
           </button>
         </div>
-        <p className="mt-2 text-xs text-zinc-500">
-          Thread: <code>{threadId || 'initializing...'}</code> • Status: <strong>{status}</strong>
+
+        <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+          Thread: <code className="rounded bg-slate-100 px-1.5 py-0.5 dark:bg-slate-800">{threadId || 'initializing...'}</code> • Events: {events.length} • Cycles logged: {timeline.length}
         </p>
       </header>
 
-      <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
-        <div className="space-y-4">{events.map((event, i) => renderEvent(event, i))}</div>
+      <div className="grid gap-5 lg:grid-cols-[1.8fr_1fr]">
+        <section className="space-y-4 rounded-2xl border border-slate-200/70 bg-white/70 p-4 shadow-lg shadow-slate-200/40 backdrop-blur dark:border-slate-800 dark:bg-slate-950/60 dark:shadow-none">
+          <div className="flex items-center justify-between">
+            <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">Execution Feed</h2>
+            <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+              Live SSE
+            </span>
+          </div>
+
+          {events.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50/80 p-6 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-400">
+              No runtime events yet. Start the loop to stream research, variant generation, and feedback actions.
+            </div>
+          ) : (
+            <div className="space-y-3">{events.map((event, i) => renderEvent(event, i))}</div>
+          )}
+        </section>
 
         <CampaignTimeline entries={timeline} />
       </div>
 
-      <section className="rounded-xl border border-zinc-200 p-4 shadow-sm">
-        <h2 className="text-lg font-semibold">Raw SSE Event Log</h2>
-        <div className="mt-3 max-h-80 overflow-y-auto rounded-md bg-zinc-950 p-3 font-mono text-xs text-zinc-100">
+      <section className="rounded-2xl border border-slate-200/70 bg-white/75 p-4 shadow-lg shadow-slate-200/40 backdrop-blur dark:border-slate-800 dark:bg-slate-950/65 dark:shadow-none">
+        <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Raw SSE Event Log</h2>
+        <div className="mt-3 max-h-80 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950 p-3 font-mono text-xs text-slate-100 shadow-inner">
           {rawEvents.map((event, index) => (
-            <pre key={`${event}-${index}`} className="whitespace-pre-wrap wrap-break-word border-b border-zinc-800 py-2">
+            <pre key={`${event}-${index}`} className="whitespace-pre-wrap wrap-break-word border-b border-slate-800/80 py-2">
               {event}
             </pre>
           ))}
-          {rawEvents.length === 0 && <p className="text-zinc-400">No events yet. Start the loop.</p>}
+          {rawEvents.length === 0 && <p className="text-slate-400">No events yet. Start the loop.</p>}
         </div>
       </section>
     </main>

@@ -37,6 +37,25 @@ export interface TimelineEntry {
   timestamp: string;
 }
 
+export interface LinkedInPost {
+  angle: string;
+  hook: string;
+  body: string;
+  cta: string;
+  hashtags: string[];
+}
+
+export interface CampaignBrief {
+  title: string;
+  positioning_statement: string;
+  target_audience: string;
+  key_messages: string[];
+  competitor_gaps: string[];
+  recommended_channels: string[];
+  next_actions: string[];
+  context?: string;
+}
+
 export interface NodeStartedEvent {
   type: 'node_started';
   node: string;

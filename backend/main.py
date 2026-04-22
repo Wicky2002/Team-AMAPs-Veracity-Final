@@ -188,5 +188,5 @@ async def inject_action(body: LoopActionRequest):
         "thread_id": body.thread_id,
         "applied_action": body.action_type,
         "event_count": len(events),
-        "latest_events": events[-3:],
+        "latest_events": events[-10:],
     }

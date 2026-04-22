@@ -1329,6 +1329,144 @@ def _build_comparison_card(
     }
 
 
+def _build_linkedin_post_grid(
+    signals: list[SignalReference],
+    variants: list[OutreachVariant],
+    message: str,
+) -> dict[str, Any]:
+    def _best_signal_quote(source_type: str, fallback: str) -> str:
+        for signal in signals:
+            if signal.source_type != source_type:
+                continue
+
+            candidate = (signal.raw_quote or signal.quote or signal.content or "").strip()
+            if candidate:
+                return candidate
+        return fallback
+
+    competitor_quote = _best_signal_quote(
+        "competitor",
+        "Most AI SDR tools still optimize for send volume over quality replies.",
+    )
+    audience_quote = _best_signal_quote(
+        "audience",
+        "Revenue teams want practical personalization and measurable outcomes.",
+    )
+    pestel_quote = _best_signal_quote(
+        "pestel",
+        "AI SDR demand remains strong where pipeline attribution is clear.",
+    )
+
+    lead_variant = variants[0] if variants else None
+    secondary_variant = variants[1] if len(variants) > 1 else lead_variant
+
+    posts = [
+        {
+            "angle": "competitor_gap",
+            "hook": "Most AI SDR teams are scaling send volume, not reply quality.",
+            "body": (
+                f"Live market signal: \"{competitor_quote[:180]}\". "
+                "The next GTM edge isn’t more sends — it’s tighter intent-to-message fit with feedback loops."
+            ),
+            "cta": "Comment ‘gap’ and I’ll share the 3-step competitor-gap teardown framework.",
+            "hashtags": ["#AISales", "#B2BSales", "#RevenueOps", "#SalesAutomation"],
+        },
+        {
+            "angle": "roi_outcome",
+            "hook": (lead_variant.subject_line if lead_variant else "What if your AI SDR strategy prioritized measurable pipeline lift?")[:120],
+            "body": (
+                f"Signal-backed insight: \"{pestel_quote[:170]}\". "
+                f"For teams we advise, this usually means focusing on one high-confidence hypothesis: "
+                f"{(lead_variant.hypothesis if lead_variant else 'ROI-led messaging')[:140]}."
+            ),
+            "cta": "Want the ROI-first outreach scorecard? Reply ‘ROI’.",
+            "hashtags": ["#Pipeline", "#RevenueGrowth", "#GTM", "#AISDR"],
+        },
+        {
+            "angle": "thought_leader",
+            "hook": "Personalization is no longer the differentiator — relevance velocity is.",
+            "body": (
+                f"Audience signal says: \"{audience_quote[:170]}\". "
+                f"For {(message or 'this campaign')[:90]}, winning teams now ship fast experiments, score replies weekly, and double down on what converts."
+            ),
+            "cta": (
+                f"If useful, I can post the exact weekly experimentation loop we use. "
+                f"({(secondary_variant.hypothesis if secondary_variant else 'Social proof + ROI blend')[:90]})"
+            ),
+            "hashtags": ["#LinkedInTips", "#SalesStrategy", "#DemandGen", "#FounderLedSales"],
+        },
+    ]
+
+    return {
+        "title": "LinkedIn Content Angles",
+        "subtitle": "3 social-ready post drafts generated from live market signals",
+        "posts": posts,
+    }
+
+
+def _build_campaign_brief(
+    signals: list[SignalReference],
+    variants: list[OutreachVariant],
+    message: str,
+    outreach_channel: str | None,
+) -> dict[str, Any]:
+    audience_quote = next(
+        (
+            (s.raw_quote or s.quote or s.content or "").strip()
+            for s in signals
+            if s.source_type == "audience"
+            and (s.raw_quote or s.quote or s.content)
+        ),
+        "Buyers prefer practical, high-signal outreach over generic personalization.",
+    )
+    competitor_quotes = [
+        (s.raw_quote or s.quote or s.content or "").strip()
+        for s in signals
+        if s.source_type == "competitor"
+    ]
+    top_competitor_gaps = [
+        quote[:160]
+        for quote in competitor_quotes[:2]
+        if quote.strip()
+    ]
+    if not top_competitor_gaps:
+        top_competitor_gaps = [
+            "Most competitors over-index on send volume instead of reply quality.",
+            "Cross-channel transparency and feedback loops are often weak.",
+        ]
+
+    key_messages: list[str] = []
+    for variant in variants[:2]:
+        if variant.hypothesis:
+            key_messages.append(variant.hypothesis[:150])
+    key_messages.append(audience_quote[:150])
+
+    recommended_channels = ["LinkedIn", "Email"]
+    if outreach_channel in {"LinkedIn", "Email", "Both"}:
+        if outreach_channel == "Both":
+            recommended_channels = ["LinkedIn", "Email"]
+        else:
+            recommended_channels = [outreach_channel, *(c for c in recommended_channels if c != outreach_channel)]
+
+    return {
+        "title": "Campaign Positioning Brief",
+        "positioning_statement": (
+            "Lilian helps revenue teams turn live buyer + competitor signals into outbound messaging "
+            "that improves reply rates through continuous feedback loops."
+        ),
+        "target_audience": "VP Sales and revenue leaders at Series B+ B2B companies",
+        "key_messages": key_messages[:3],
+        "competitor_gaps": top_competitor_gaps,
+        "recommended_channels": recommended_channels,
+        "next_actions": [
+            "Run a 2-variant outreach test this week (competitor-gap vs ROI framing).",
+            "Publish one LinkedIn angle daily for 3 days and track comment quality.",
+            "Feed campaign metrics back into the loop to refine winner hypotheses.",
+        ],
+        "context": message[:180],
+    }
+
+
 async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
     state_model = coerce_state(state)
     _emit(NodeStartedEvent(type="node_started", node="ab_variant", cycle_n=state_model.cycle_n))
@@ -1369,6 +1507,31 @@ async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
         )
     )
 
+    linkedin_post_grid = _build_linkedin_post_grid(state_model.signals, variants, state_model.message)
+    _emit(
+        UIRenderEvent(
+            type="ui_render",
+            component=UIComponent.LINKEDIN_POST_GRID,
+            props=linkedin_post_grid,
+            cycle_n=state_model.cycle_n,
+        )
+    )
+
+    campaign_brief = _build_campaign_brief(
+        state_model.signals,
+        variants,
+        state_model.message,
+        state_model.outreach_channel,
+    )
+    _emit(
+        UIRenderEvent(
+            type="ui_render",
+            component=UIComponent.CAMPAIGN_BRIEF_CARD,
+            props=campaign_brief,
+            cycle_n=state_model.cycle_n,
+        )
+    )
+
     next_stage = guarded_stage_transition(state_model.loop_stage, "outreach")
 
     next_state = state_model.model_dump()
@@ -1387,6 +1550,16 @@ async def outreach_node(state: dict[str, Any]) -> dict[str, Any]:
 
     selected_channel = state_model.outreach_channel or "LinkedIn"
     selected_variant = state_model.selected_variant or (state_model.variants[0] if state_model.variants else None)
+
+    if selected_channel in {"LinkedIn", "Both"}:
+        _emit(
+            UIRenderEvent(
+                type="ui_render",
+                component=UIComponent.LINKEDIN_POST_GRID,
+                props=_build_linkedin_post_grid(state_model.signals, state_model.variants, state_model.message),
+                cycle_n=state_model.cycle_n,
+            )
+        )
 
     metrics = [
         {"variant": 0, "open_rate": 0.44, "reply_rate": 0.11, "click_rate": 0.08},

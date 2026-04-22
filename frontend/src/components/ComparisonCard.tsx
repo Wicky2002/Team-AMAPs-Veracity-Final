@@ -121,24 +121,42 @@ function renderToPNG(element: HTMLElement): Promise<Blob> {
       { type: 'image/svg+xml;charset=utf-8' }
     );
     const url = URL.createObjectURL(svgBlob);
+    const resolveHtmlFallback = () => {
+      resolve(new Blob([element.outerHTML], { type: 'text/html' }));
+    };
+
     const img = new Image();
+    img.crossOrigin = 'anonymous';
     img.onload = () => {
-      ctx.drawImage(img, 0, 0);
+      try {
+        ctx.drawImage(img, 0, 0);
+      } catch {
+        URL.revokeObjectURL(url);
+        resolveHtmlFallback();
+        return;
+      }
+
       URL.revokeObjectURL(url);
-      canvas.toBlob(
-        (blob) => {
-          if (blob) resolve(blob);
-          else reject(new Error('PNG conversion failed'));
-        },
-        'image/png',
-        1.0
-      );
+
+      try {
+        canvas.toBlob(
+          (blob) => {
+            if (blob) {
+              resolve(blob);
+              return;
+            }
+            resolveHtmlFallback();
+          },
+          'image/png',
+          1.0
+        );
+      } catch {
+        resolveHtmlFallback();
+      }
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
-      // Fallback: download as HTML instead
-      const html = element.outerHTML;
-      resolve(new Blob([html], { type: 'text/html' }));
+      resolveHtmlFallback();
     };
     img.src = url;
   });
@@ -165,39 +183,39 @@ export function ComparisonCard({ title, subtitle, competitors, market_insight }:
   }, [handleDownloadHTML]);
 
   return (
-    <section className="rounded-xl border border-zinc-200 p-5 shadow-sm">
+    <section className="rounded-2xl border border-slate-200/70 bg-white/80 p-5 shadow-lg shadow-slate-200/40 backdrop-blur dark:border-slate-800 dark:bg-slate-950/65 dark:shadow-none">
       <div className="mb-4 flex items-start justify-between">
         <div>
-          <h2 className="text-lg font-bold">{title}</h2>
-          <p className="text-xs text-zinc-500">{subtitle}</p>
+          <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">{title}</h2>
+          <p className="text-xs text-slate-500 dark:text-slate-400">{subtitle}</p>
         </div>
         <div className="flex gap-2">
           <button
             type="button"
             onClick={handleDownloadHTML}
-            className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium hover:bg-zinc-50"
+            className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
           >
             ↓ HTML
           </button>
           <button
             type="button"
             onClick={() => void handleDownloadPNG()}
-            className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700"
+            className="rounded-lg bg-gradient-to-r from-indigo-600 to-blue-600 px-3 py-1.5 text-xs font-semibold text-white shadow transition hover:from-indigo-500 hover:to-blue-500"
           >
             ↓ PNG
           </button>
         </div>
       </div>
 
-      <div ref={cardRef} className="rounded-lg bg-slate-50 p-4">
+      <div ref={cardRef} className="rounded-xl border border-slate-200 bg-slate-50/90 p-4 dark:border-slate-800 dark:bg-slate-900/70">
         <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
           {competitors.map((comp) => (
             <article
               key={comp.name}
               className={`relative overflow-hidden rounded-xl p-4 ${
                 comp.highlight
-                  ? 'border-2 border-blue-500 bg-gradient-to-br from-slate-900 to-slate-800 text-slate-50'
-                  : 'border border-zinc-200 bg-white text-slate-900'
+                  ? 'border-2 border-blue-500 bg-gradient-to-br from-slate-900 to-slate-800 text-slate-50 shadow-md'
+                  : 'border border-slate-200 bg-white text-slate-900 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100'
               }`}
             >
               {comp.highlight && (
@@ -206,7 +224,7 @@ export function ComparisonCard({ title, subtitle, competitors, market_insight }:
                 </span>
               )}
               <h3 className="text-sm font-bold">{comp.name}</h3>
-              <p className={`mb-3 text-xs ${comp.highlight ? 'text-slate-400' : 'text-zinc-500'}`}>
+              <p className={`mb-3 text-xs ${comp.highlight ? 'text-slate-300' : 'text-slate-500 dark:text-slate-400'}`}>
                 {comp.tagline}
               </p>
 
@@ -243,14 +261,14 @@ export function ComparisonCard({ title, subtitle, competitors, market_insight }:
           ))}
         </div>
 
-        <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
+        <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 dark:border-blue-500/30 dark:bg-blue-950/40">
           <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-blue-700">
             Market Insight
           </p>
-          <p className="text-xs text-blue-900">{market_insight}</p>
+          <p className="text-xs text-blue-900 dark:text-blue-100">{market_insight}</p>
         </div>
 
-        <p className="mt-2 text-center text-[10px] text-zinc-400">
+        <p className="mt-2 text-center text-[10px] text-slate-400 dark:text-slate-500">
           Generated by Vector Agents Signal-to-Action • {new Date().toLocaleDateString()}
         </p>
       </div>

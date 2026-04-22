@@ -9,18 +9,20 @@ const CHANNELS: Channel[] = ['LinkedIn', 'Email', 'Both'];
 
 export function ChannelIntentPicker({ selected, onSelect }: Props) {
   return (
-    <section className="rounded-xl border border-zinc-200 p-4 shadow-sm">
-      <h2 className="text-lg font-semibold">Channel Intent Picker</h2>
-      <div className="mt-3 flex flex-wrap gap-2">
+    <section className="rounded-2xl border border-slate-200/70 bg-white/80 p-4 shadow-lg shadow-slate-200/40 backdrop-blur dark:border-slate-800 dark:bg-slate-950/65 dark:shadow-none">
+      <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Channel Intent Picker</h2>
+      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Select the deployment channel for this cycle.</p>
+
+      <div className="mt-3 inline-flex flex-wrap gap-2 rounded-xl border border-slate-200 bg-slate-50 p-1 dark:border-slate-800 dark:bg-slate-900">
         {CHANNELS.map((channel) => (
           <button
             key={channel}
             type="button"
             onClick={() => onSelect(channel)}
-            className={`rounded-md border px-3 py-1.5 text-sm ${
+            className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
               selected === channel
-                ? 'border-black bg-black text-white'
-                : 'border-zinc-300 bg-white text-zinc-800 hover:bg-zinc-50'
+                ? 'bg-slate-900 text-white shadow dark:bg-indigo-600'
+                : 'text-slate-700 hover:bg-white hover:shadow-sm dark:text-slate-200 dark:hover:bg-slate-800'
             }`}
           >
             {channel}

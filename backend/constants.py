@@ -12,6 +12,8 @@ class UIComponent:
     FEEDBACK_PANEL = "FeedbackPanel"
     STALE_WARNING = "StaleWarning"
     COMPARISON_CARD = "ComparisonCard"
+    LINKEDIN_POST_GRID = "LinkedInPostGrid"
+    CAMPAIGN_BRIEF_CARD = "CampaignBriefCard"
 
 
 UI_COMPONENT_VALUES = (
@@ -21,6 +23,8 @@ UI_COMPONENT_VALUES = (
     UIComponent.FEEDBACK_PANEL,
     UIComponent.STALE_WARNING,
     UIComponent.COMPARISON_CARD,
+    UIComponent.LINKEDIN_POST_GRID,
+    UIComponent.CAMPAIGN_BRIEF_CARD,
 )
 UI_COMPONENT_SET = set(UI_COMPONENT_VALUES)
 
@@ -34,6 +38,8 @@ UI_COMPONENT_ALIASES: dict[str, str] = {
     "feedback_panel": UIComponent.FEEDBACK_PANEL,
     "stale_warning": UIComponent.STALE_WARNING,
     "comparison_card": UIComponent.COMPARISON_CARD,
+    "linkedin_post_grid": UIComponent.LINKEDIN_POST_GRID,
+    "campaign_brief_card": UIComponent.CAMPAIGN_BRIEF_CARD,
 }
 
 
