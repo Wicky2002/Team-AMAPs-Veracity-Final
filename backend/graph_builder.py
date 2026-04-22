@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover - optional dependency guard
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from constants import ROUTE_END, ROUTE_END_LEGACY, ROUTE_LOOP_BACK
 from graph_nodes import (
     ab_variant_node,
     content_gen_node,
@@ -43,7 +44,7 @@ def _build_graph():
         "intent_router",
         route_from_intent,
         {
-            "market_intelligence": "market_intelligence",
+            ROUTE_LOOP_BACK: ROUTE_LOOP_BACK,
             "content_generation": "content_generation",
             "ab_variant": "ab_variant",
             "outreach": "outreach",
@@ -59,8 +60,9 @@ def _build_graph():
         "feedback_ingestor",
         route_after_feedback,
         {
-            "market_intelligence": "market_intelligence",
-            "end": END,
+            ROUTE_LOOP_BACK: ROUTE_LOOP_BACK,
+            ROUTE_END: END,
+            ROUTE_END_LEGACY: END,
         },
     )
 

@@ -1,3 +1,5 @@
+import type { UIRenderComponent } from './ui-components';
+
 export type LoopStage = 'research' | 'generate' | 'ab' | 'outreach' | 'feedback';
 
 export interface SignalReference {
@@ -49,11 +51,7 @@ export interface SignalFoundEvent {
   quote: string;
 }
 
-export type UIRenderComponent =
-  | 'SignalIntelligenceBoard'
-  | 'ABVariantGrid'
-  | 'ChannelIntentPicker'
-  | 'FeedbackPanel';
+export type { UIRenderComponent };
 
 export interface UIRenderEvent {
   type: 'ui_render';

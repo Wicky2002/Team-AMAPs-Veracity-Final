@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import graph_nodes
+from constants import UIComponent, UI_COMPONENT_VALUES
 from events import LoopCompleteEvent, NodeStartedEvent, SignalFoundEvent, UIRenderEvent, WarningEvent, normalize_event
 from graph_nodes import ab_variant_node, feedback_ingestor_node, market_intelligence_node
 from state import SignalReference
@@ -55,7 +56,7 @@ class TestSSEEventModels:
                 confidence=0.9,
                 quote="Competitor signal",
             ),
-            UIRenderEvent(type="ui_render", component="FeedbackPanel", props={}, cycle_n=0),
+            UIRenderEvent(type="ui_render", component=UIComponent.FEEDBACK_PANEL, props={}, cycle_n=0),
             LoopCompleteEvent(type="loop_complete", cycle_n=0, next_action="refined_research"),
             WarningEvent(type="warning", message="stale signal warning: cached age 24h", fallback_used=True),
         ],
@@ -77,12 +78,7 @@ class TestSSEEventModels:
 
     @pytest.mark.parametrize(
         "component",
-        [
-            "SignalIntelligenceBoard",
-            "ABVariantGrid",
-            "ChannelIntentPicker",
-            "FeedbackPanel",
-        ],
+        UI_COMPONENT_VALUES,
     )
     def test_all_valid_component_names_accepted(self, component: str):
         normalized = normalize_event(
@@ -105,7 +101,7 @@ class TestSSEEventModels:
                 confidence=0.82,
                 quote="generic personalization isn't working",
             ),
-            UIRenderEvent(type="ui_render", component="FeedbackPanel", props={"metrics": []}, cycle_n=0),
+            UIRenderEvent(type="ui_render", component=UIComponent.FEEDBACK_PANEL, props={"metrics": []}, cycle_n=0),
             LoopCompleteEvent(type="loop_complete", cycle_n=1, next_action="refined_research"),
             WarningEvent(type="warning", message="stale signal warning: cached age 36h", fallback_used=True),
         ]
@@ -139,7 +135,7 @@ class TestSSEEmissionOrder:
         assert "node_started" in types
         assert "signal_found" in types
         assert any(
-            evt.get("type") == "ui_render" and evt.get("component") == "SignalIntelligenceBoard"
+            evt.get("type") == "ui_render" and evt.get("component") == UIComponent.SIGNAL_BOARD
             for evt in emitted
         )
 
@@ -148,7 +144,7 @@ class TestSSEEmissionOrder:
         first_ui = next(
             idx
             for idx, evt in enumerate(emitted)
-            if evt.get("type") == "ui_render" and evt.get("component") == "SignalIntelligenceBoard"
+            if evt.get("type") == "ui_render" and evt.get("component") == UIComponent.SIGNAL_BOARD
         )
         assert first_node_started < first_signal < first_ui
 
@@ -195,7 +191,7 @@ class TestSSEEmissionOrder:
         ab_renders = [
             evt
             for evt in emitted
-            if evt.get("type") == "ui_render" and evt.get("component") == "ABVariantGrid"
+            if evt.get("type") == "ui_render" and evt.get("component") == UIComponent.AB_GRID
         ]
         assert len(ab_renders) == 1
         props = ab_renders[0].get("props", {})
@@ -253,14 +249,14 @@ class TestSSEEmissionOrder:
 
         types = [evt.get("type") for evt in emitted]
         assert "node_started" in types
-        assert any(evt.get("type") == "ui_render" and evt.get("component") == "FeedbackPanel" for evt in emitted)
+        assert any(evt.get("type") == "ui_render" and evt.get("component") == UIComponent.FEEDBACK_PANEL for evt in emitted)
         assert "loop_complete" in types
 
         idx_started = types.index("node_started")
         idx_feedback = next(
             idx
             for idx, evt in enumerate(emitted)
-            if evt.get("type") == "ui_render" and evt.get("component") == "FeedbackPanel"
+            if evt.get("type") == "ui_render" and evt.get("component") == UIComponent.FEEDBACK_PANEL
         )
         idx_complete = types.index("loop_complete")
         assert idx_started < idx_feedback < idx_complete

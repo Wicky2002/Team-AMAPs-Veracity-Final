@@ -23,6 +23,7 @@ except Exception:  # pragma: no cover - optional dependency guard
     anthropic = None
     instructor = None
 
+from constants import ROUTE_END, ROUTE_LOOP_BACK, UIComponent
 from events import LoopCompleteEvent, NodeStartedEvent, SignalFoundEvent, UIRenderEvent, WarningEvent
 from intent_router import detect_intent
 from mcp_tools import TARGETS, get_last_pestel_error, scan_audience_intent, scan_pestel_trends, scrape_competitor
@@ -238,6 +239,74 @@ def _to_angle(hypothesis: str) -> Literal["competitor_gap", "roi", "social_proof
     return "competitor_gap"
 
 
+def _angle_prompt_name(angle: Literal["competitor_gap", "roi", "social_proof"]) -> str:
+    labels = {
+        "competitor_gap": "competitor gap angle",
+        "roi": "ROI/outcome angle",
+        "social_proof": "social proof angle",
+    }
+    return labels.get(angle, "competitor gap angle")
+
+
+def _preferred_variant_angles(
+    preferred_angle: Literal["competitor_gap", "roi", "social_proof"] | None,
+) -> tuple[
+    Literal["competitor_gap", "roi", "social_proof"],
+    Literal["competitor_gap", "roi", "social_proof"],
+]:
+    if preferred_angle == "roi":
+        return "roi", "competitor_gap"
+    if preferred_angle == "social_proof":
+        return "social_proof", "competitor_gap"
+    return "competitor_gap", "roi"
+
+
+def _infer_winning_angle(
+    campaign_history: list[CycleResult],
+) -> Literal["competitor_gap", "roi", "social_proof"] | None:
+    if not campaign_history:
+        return None
+
+    recent = campaign_history[-5:]
+    angle_scores: dict[Literal["competitor_gap", "roi", "social_proof"], float] = {
+        "competitor_gap": 0.0,
+        "roi": 0.0,
+        "social_proof": 0.0,
+    }
+
+    total = len(recent)
+    for idx, result in enumerate(recent):
+        recency_weight = 1.0 + (idx / max(1, total - 1)) * 0.5
+        reply_rate = max(float(result.reply_rate), 0.0)
+        open_rate = max(float(result.open_rate), 0.0)
+        performance_score = max(reply_rate, open_rate * 0.35, 0.01)
+        angle_scores[result.angle] += recency_weight * performance_score
+
+    preferred_angle = max(angle_scores, key=angle_scores.get)
+    if angle_scores[preferred_angle] <= 0:
+        return None
+    return preferred_angle
+
+
+def _build_learning_brief(
+    campaign_history: list[CycleResult],
+    preferred_angle: Literal["competitor_gap", "roi", "social_proof"] | None,
+) -> str:
+    if not campaign_history or preferred_angle is None:
+        return "No prior campaign winners available yet."
+
+    recent = campaign_history[-5:]
+    wins = [cycle for cycle in recent if cycle.angle == preferred_angle]
+    avg_reply_rate = sum(float(cycle.reply_rate) for cycle in wins) / max(1, len(wins))
+    latest = recent[-1]
+
+    return (
+        f"Recent winner trend: {_angle_prompt_name(preferred_angle)} "
+        f"({len(wins)}/{len(recent)} recent cycles, avg reply rate {avg_reply_rate * 100:.1f}%). "
+        f"Latest winner: '{latest.winning_variant}' with {_angle_prompt_name(latest.angle)}."
+    )
+
+
 def _copy_signal(signal: SignalReference) -> SignalReference:
     return SignalReference.model_validate(signal.model_dump())
 
@@ -298,28 +367,55 @@ def _fallback_audience_signals() -> list[SignalReference]:
     ]
 
 
-def _fallback_variants(top_signals: list[SignalReference]) -> list[OutreachVariant]:
+def _fallback_variant_for_angle(
+    angle: Literal["competitor_gap", "roi", "social_proof"],
+    *,
+    competitor_quote: str,
+    outcome_quote: str,
+) -> OutreachVariant:
+    if angle == "roi":
+        return OutreachVariant(
+            subject_line="A practical path to 3x better AI SDR reply rates",
+            hook=f"Revenue teams now care most about outcomes and attribution — {outcome_quote[:140]}",
+            cta="Want the ROI playbook we use with Series B sales teams?",
+            hypothesis="ROI framing should win with VP Sales buyers focused on predictable pipeline.",
+            provenance_chain=[],
+        )
+
+    if angle == "social_proof":
+        return OutreachVariant(
+            subject_line="How peer teams are improving reply rates with AI SDRs",
+            hook=f"Top teams respond faster to concrete proof over claims — {outcome_quote[:140]}",
+            cta="Want 3 real examples we can adapt to your outreach this week?",
+            hypothesis="Social proof framing should reduce skepticism by showing credible peer outcomes.",
+            provenance_chain=[],
+        )
+
+    return OutreachVariant(
+        subject_line="The AI SDR gap most teams are still paying for",
+        hook=f"Most AI SDR tools optimize sends, not conversions — {competitor_quote[:140]}",
+        cta="Open to a 15-minute gap analysis this week?",
+        hypothesis="Competitor gap framing will create urgency by naming an avoidable risk.",
+        provenance_chain=[],
+    )
+
+
+def _fallback_variants(
+    top_signals: list[SignalReference],
+    *,
+    preferred_angle: Literal["competitor_gap", "roi", "social_proof"] | None = None,
+) -> list[OutreachVariant]:
     competitor_quote = next((s.raw_quote for s in top_signals if s.source_type == "competitor"), "AI SDR tools over-index on volume")
     outcome_quote = next(
         (s.raw_quote for s in top_signals if s.source_type in {"audience", "pestel"}),
         "Teams are prioritizing measurable pipeline outcomes",
     )
 
+    first_angle, second_angle = _preferred_variant_angles(preferred_angle)
+
     return [
-        OutreachVariant(
-            subject_line="The AI SDR gap most teams are still paying for",
-            hook=f"Most AI SDR tools optimize sends, not conversions — {competitor_quote[:140]}",
-            cta="Open to a 15-minute gap analysis this week?",
-            hypothesis="Competitor gap framing will create urgency by naming an avoidable risk.",
-            provenance_chain=[],
-        ),
-        OutreachVariant(
-            subject_line="A practical path to 3x better AI SDR reply rates",
-            hook=f"Revenue teams now care most about outcomes and attribution — {outcome_quote[:140]}",
-            cta="Want the ROI playbook we use with Series B sales teams?",
-            hypothesis="ROI framing should win with VP Sales buyers focused on predictable pipeline.",
-            provenance_chain=[],
-        ),
+        _fallback_variant_for_angle(first_angle, competitor_quote=competitor_quote, outcome_quote=outcome_quote),
+        _fallback_variant_for_angle(second_angle, competitor_quote=competitor_quote, outcome_quote=outcome_quote),
     ]
 
 
@@ -355,7 +451,12 @@ def _provenance_for_variant(
     return [_copy_signal(sig) for sig in preferred[:4]]
 
 
-def _enrich_variants(variants: list[OutreachVariant], top_signals: list[SignalReference]) -> list[OutreachVariant]:
+def _enrich_variants(
+    variants: list[OutreachVariant],
+    top_signals: list[SignalReference],
+    *,
+    preferred_angle: Literal["competitor_gap", "roi", "social_proof"] | None = None,
+) -> list[OutreachVariant]:
     defaults = (
         "Competitor gap framing will create urgency around differentiation.",
         "ROI framing will resonate with VP Sales outcome ownership.",
@@ -374,8 +475,9 @@ def _enrich_variants(variants: list[OutreachVariant], top_signals: list[SignalRe
             )
         )
 
+    fallback_pool = _fallback_variants(top_signals, preferred_angle=preferred_angle)
     while len(enriched) < 2:
-        fallback_variant = _fallback_variants(top_signals)[len(enriched)]
+        fallback_variant = fallback_pool[len(enriched)]
         enriched.append(
             OutreachVariant(
                 subject_line=fallback_variant.subject_line,
@@ -432,6 +534,8 @@ async def _generate_variants_with_claude(
     *,
     message: str,
     top_signals: list[SignalReference],
+    learning_brief: str | None = None,
+    preferred_angle: Literal["competitor_gap", "roi", "social_proof"] | None = None,
 ) -> list[OutreachVariant] | None:
     _set_last_claude_error(None)
     client = _get_anthropic_client()
@@ -440,15 +544,22 @@ async def _generate_variants_with_claude(
         return None
 
     signals_text = "\n".join([f"- [{s.source_type}] {s.raw_quote}" for s in top_signals])
+    angle_a, angle_b = _preferred_variant_angles(preferred_angle)
+    history_context = learning_brief or "No prior campaign winners available yet."
 
     prompt = f"""You are a B2B growth expert. Based on these live market signals about the AI SDR space:
 
 {signals_text}
 
+Historical performance memory:
+{history_context}
+
 Generate 2 outreach email variants for Lilian (Vector Agents AI SDR) targeting VP Sales at Series B companies.
 
-Variant A: Lead with competitor gap angle
-Variant B: Lead with ROI/outcome angle
+Variant A: Lead with {_angle_prompt_name(angle_a)}
+Variant B: Lead with {_angle_prompt_name(angle_b)}
+
+If historical memory indicates a winning angle, bias your framing toward it unless current signals strongly contradict it.
 
 Each variant must include: subject_line, hook (first sentence), cta, hypothesis.
 Keep each field concise and specific.
@@ -506,6 +617,8 @@ async def _generate_variants_with_ollama(
     *,
     message: str,
     top_signals: list[SignalReference],
+    learning_brief: str | None = None,
+    preferred_angle: Literal["competitor_gap", "roi", "social_proof"] | None = None,
 ) -> list[OutreachVariant] | None:
     _set_last_ollama_error(None)
     config = _get_ollama_config()
@@ -516,6 +629,8 @@ async def _generate_variants_with_ollama(
     base_url, model = config
 
     signals_text = "\n".join([f"- [{s.source_type}] {s.raw_quote}" for s in top_signals])
+    angle_a, angle_b = _preferred_variant_angles(preferred_angle)
+    history_context = learning_brief or "No prior campaign winners available yet."
     prompt = f"""You are a B2B growth expert.
 Return ONLY valid JSON in this exact schema:
 {{
@@ -528,11 +643,15 @@ Return ONLY valid JSON in this exact schema:
 Context signals:
 {signals_text}
 
+Historical performance memory:
+{history_context}
+
 Task:
 - Generate 2 outreach email variants for Lilian (Vector Agents AI SDR) targeting VP Sales at Series B companies.
-- Variant A must lead with competitor gap angle.
-- Variant B must lead with ROI/outcome angle.
+- Variant A must lead with {_angle_prompt_name(angle_a)}.
+- Variant B must lead with {_angle_prompt_name(angle_b)}.
 - Keep each field concise and specific.
+- If historical memory indicates a winning angle, bias your framing toward it unless current signals strongly contradict it.
 
 User context: {message}
 """
@@ -645,28 +764,60 @@ async def _generate_variants_with_llm(
     *,
     message: str,
     top_signals: list[SignalReference],
+    learning_brief: str | None = None,
+    preferred_angle: Literal["competitor_gap", "roi", "social_proof"] | None = None,
 ) -> list[OutreachVariant] | None:
     _set_last_ollama_error(None)
     _set_last_claude_error(None)
     provider = _get_llm_provider()
 
     if provider == "ollama":
-        variants = await _generate_variants_with_ollama(message=message, top_signals=top_signals)
+        variants = await _generate_variants_with_ollama(
+            message=message,
+            top_signals=top_signals,
+            learning_brief=learning_brief,
+            preferred_angle=preferred_angle,
+        )
         if variants:
             return variants
-        return await _generate_variants_with_claude(message=message, top_signals=top_signals)
+        return await _generate_variants_with_claude(
+            message=message,
+            top_signals=top_signals,
+            learning_brief=learning_brief,
+            preferred_angle=preferred_angle,
+        )
 
     if provider == "anthropic":
-        variants = await _generate_variants_with_claude(message=message, top_signals=top_signals)
+        variants = await _generate_variants_with_claude(
+            message=message,
+            top_signals=top_signals,
+            learning_brief=learning_brief,
+            preferred_angle=preferred_angle,
+        )
         if variants:
             return variants
-        return await _generate_variants_with_ollama(message=message, top_signals=top_signals)
+        return await _generate_variants_with_ollama(
+            message=message,
+            top_signals=top_signals,
+            learning_brief=learning_brief,
+            preferred_angle=preferred_angle,
+        )
 
     # auto mode: prefer Anthropic if configured, then Ollama.
-    variants = await _generate_variants_with_claude(message=message, top_signals=top_signals)
+    variants = await _generate_variants_with_claude(
+        message=message,
+        top_signals=top_signals,
+        learning_brief=learning_brief,
+        preferred_angle=preferred_angle,
+    )
     if variants:
         return variants
-    return await _generate_variants_with_ollama(message=message, top_signals=top_signals)
+    return await _generate_variants_with_ollama(
+        message=message,
+        top_signals=top_signals,
+        learning_brief=learning_brief,
+        preferred_angle=preferred_angle,
+    )
 
 
 async def intent_router_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -741,13 +892,13 @@ async def intent_router_node(state: dict[str, Any]) -> dict[str, Any]:
 def route_from_intent(state: dict[str, Any]) -> str:
     stage = str(state.get("loop_stage", "research"))
     route_map = {
-        "research": "market_intelligence",
+        "research": ROUTE_LOOP_BACK,
         "generate": "content_generation",
         "ab": "ab_variant",
         "outreach": "outreach",
         "feedback": "feedback_ingestor",
     }
-    return route_map.get(stage, "market_intelligence")
+    return route_map.get(stage, ROUTE_LOOP_BACK)
 
 
 async def market_intelligence_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -832,7 +983,7 @@ async def market_intelligence_node(state: dict[str, Any]) -> dict[str, Any]:
     _emit(
         UIRenderEvent(
             type="ui_render",
-            component="SignalIntelligenceBoard",
+            component=UIComponent.SIGNAL_BOARD,
             props={"signals": [_to_signal_card(s) for s in signals]},
             cycle_n=state_model.cycle_n,
         )
@@ -855,16 +1006,24 @@ async def content_gen_node(state: dict[str, Any]) -> dict[str, Any]:
     _emit(NodeStartedEvent(type="node_started", node="content_gen", cycle_n=state_model.cycle_n))
 
     top_signals = _select_top_signals(state_model.signals, limit=5)
+    preferred_angle = _infer_winning_angle(state_model.campaign_history)
+    learning_brief = _build_learning_brief(state_model.campaign_history, preferred_angle)
     provider = _get_llm_provider()
     variants = await _generate_variants_with_llm(
         message=state_model.message,
         top_signals=top_signals,
+        learning_brief=learning_brief,
+        preferred_angle=preferred_angle,
     )
 
     if not variants:
-        variants = _fallback_variants(top_signals)
+        variants = _fallback_variants(top_signals, preferred_angle=preferred_angle)
         llm_detail = _describe_llm_failure(provider)
         warning_message = "LLM generation unavailable or failed; deterministic fallback variants used."
+        if preferred_angle:
+            warning_message = (
+                f"{warning_message} Historical bias applied: {_angle_prompt_name(preferred_angle)}."
+            )
         if llm_detail:
             warning_message = f"{warning_message} Details: {llm_detail}"
         _emit(
@@ -892,15 +1051,16 @@ async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
     _emit(NodeStartedEvent(type="node_started", node="ab_variant", cycle_n=state_model.cycle_n))
 
     top_signals = _select_top_signals(state_model.signals, limit=5)
-    source_variants = state_model.variants or _fallback_variants(top_signals)
-    variants = _enrich_variants(source_variants, top_signals)
+    preferred_angle = _infer_winning_angle(state_model.campaign_history)
+    source_variants = state_model.variants or _fallback_variants(top_signals, preferred_angle=preferred_angle)
+    variants = _enrich_variants(source_variants, top_signals, preferred_angle=preferred_angle)
 
     variant_payload = [v.model_dump() for v in variants]
 
     _emit(
         UIRenderEvent(
             type="ui_render",
-            component="ABVariantGrid",
+            component=UIComponent.AB_GRID,
             props={"variants": variant_payload},
             cycle_n=state_model.cycle_n,
         )
@@ -909,7 +1069,7 @@ async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
     _emit(
         UIRenderEvent(
             type="ui_render",
-            component="ChannelIntentPicker",
+            component=UIComponent.CHANNEL_PICKER,
             props={"selected": state_model.outreach_channel},
             cycle_n=state_model.cycle_n,
         )
@@ -950,7 +1110,7 @@ async def outreach_node(state: dict[str, Any]) -> dict[str, Any]:
     _emit(
         UIRenderEvent(
             type="ui_render",
-            component="FeedbackPanel",
+            component=UIComponent.FEEDBACK_PANEL,
             props={
                 "metrics": metrics,
                 "selected_channel": selected_channel,
@@ -1036,7 +1196,7 @@ async def feedback_ingestor_node(state: dict[str, Any]) -> dict[str, Any]:
         _emit(
             UIRenderEvent(
                 type="ui_render",
-                component="FeedbackPanel",
+                component=UIComponent.FEEDBACK_PANEL,
                 props={
                     "metrics": effective_metrics,
                     "campaign_history": [entry.model_dump() for entry in campaign_history],
@@ -1069,5 +1229,5 @@ async def feedback_ingestor_node(state: dict[str, Any]) -> dict[str, Any]:
 def route_after_feedback(state: dict[str, Any]) -> str:
     # Loop continuation is controlled by loop_stage after feedback processing.
     if state.get("loop_stage") == "research":
-        return "market_intelligence"
-    return "end"
+        return ROUTE_LOOP_BACK
+    return ROUTE_END

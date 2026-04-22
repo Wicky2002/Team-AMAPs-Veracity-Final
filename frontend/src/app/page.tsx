@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 
 import { ABVariantGrid } from '@/components/ABVariantGrid';
 import { CampaignTimeline } from '@/components/CampaignTimeline';
@@ -8,6 +8,7 @@ import { ChannelIntentPicker } from '@/components/ChannelIntentPicker';
 import { FeedbackPanel } from '@/components/FeedbackPanel';
 import { SignalIntelligenceBoard } from '@/components/SignalIntelligenceBoard';
 import type { FeedbackMetric, OutreachVariant, SSEEvent, SignalReference, TimelineEntry } from '@/lib/loop-types';
+import { UI_COMPONENT, normalizeUIRenderComponent } from '@/lib/ui-components';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
@@ -148,14 +149,17 @@ const isSSEEvent = (value: unknown): value is SSEEvent => {
         typeof value.confidence === 'number'
       );
     case 'ui_render':
-      return (
-        (value.component === 'SignalIntelligenceBoard' ||
-          value.component === 'ABVariantGrid' ||
-          value.component === 'ChannelIntentPicker' ||
-          value.component === 'FeedbackPanel') &&
-        isRecord(value.props) &&
-        typeof value.cycle_n === 'number'
-      );
+      if (!isRecord(value.props) || typeof value.cycle_n !== 'number') {
+        return false;
+      }
+
+      const component = normalizeUIRenderComponent(value.component);
+      if (!component) {
+        return false;
+      }
+
+      value.component = component;
+      return true;
     case 'loop_complete':
       return (
         typeof value.cycle_n === 'number' &&
@@ -180,10 +184,6 @@ export default function Home() {
 
   const eventSourceRef = useRef<EventSource | null>(null);
 
-  useEffect(() => {
-    setThreadId((prev) => prev || crypto.randomUUID());
-  }, []);
-
   const resolveThreadId = () => {
     if (threadId) {
       return threadId;
@@ -201,7 +201,7 @@ export default function Home() {
   const applyTypedEvent = (parsed: SSEEvent) => {
     setEvents((prev) => [...prev, parsed].slice(-180));
 
-    if (parsed.type === 'ui_render' && parsed.component === 'FeedbackPanel') {
+    if (parsed.type === 'ui_render' && parsed.component === UI_COMPONENT.FEEDBACK_PANEL) {
       const nextTimeline = toTimeline(parsed.props);
       if (nextTimeline.length > 0) {
         setTimeline(nextTimeline);
@@ -312,9 +312,9 @@ export default function Home() {
 
     if (event.type === 'ui_render') {
       switch (event.component) {
-        case 'SignalIntelligenceBoard':
+        case UI_COMPONENT.SIGNAL_BOARD:
           return <SignalIntelligenceBoard key={`ui-signal-${index}`} signals={toSignals(event.props)} />;
-        case 'ABVariantGrid':
+        case UI_COMPONENT.AB_GRID:
           return (
             <ABVariantGrid
               key={`ui-ab-${index}`}
@@ -324,7 +324,7 @@ export default function Home() {
               }}
             />
           );
-        case 'ChannelIntentPicker':
+        case UI_COMPONENT.CHANNEL_PICKER:
           return (
             <ChannelIntentPicker
               key={`ui-channel-${index}`}
@@ -334,7 +334,7 @@ export default function Home() {
               }}
             />
           );
-        case 'FeedbackPanel':
+        case UI_COMPONENT.FEEDBACK_PANEL:
           return (
             <FeedbackPanel
               key={`ui-feedback-${index}`}
@@ -352,6 +352,15 @@ export default function Home() {
                 });
               }}
             />
+          );
+        case UI_COMPONENT.STALE_WARNING:
+          return (
+            <div
+              key={`ui-stale-${index}`}
+              className="rounded-lg border border-amber-400/30 bg-amber-50 p-3 text-sm text-amber-900"
+            >
+              {typeof event.props.message === 'string' ? event.props.message : 'Signals may be stale.'}
+            </div>
           );
         default:
           return null;

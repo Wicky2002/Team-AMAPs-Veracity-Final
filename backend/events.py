@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypeAlias, Union
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, field_validator
+
+from constants import UI_COMPONENT_VALUES, canonicalize_ui_component
 
 
 class NodeStartedEvent(BaseModel):
@@ -21,14 +23,18 @@ class SignalFoundEvent(BaseModel):
 
 class UIRenderEvent(BaseModel):
     type: Literal["ui_render"]
-    component: Literal[
-        "SignalIntelligenceBoard",
-        "ABVariantGrid",
-        "ChannelIntentPicker",
-        "FeedbackPanel",
-    ]
+    component: str
     props: dict[str, Any]
     cycle_n: int
+
+    @field_validator("component")
+    @classmethod
+    def _normalize_component(cls, value: str) -> str:
+        normalized = canonicalize_ui_component(value)
+        if normalized is None:
+            options = ", ".join(UI_COMPONENT_VALUES)
+            raise ValueError(f"component must be one of: {options}")
+        return normalized
 
 
 class LoopCompleteEvent(BaseModel):

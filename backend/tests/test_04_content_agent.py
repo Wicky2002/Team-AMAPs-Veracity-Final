@@ -12,8 +12,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import graph_nodes
+from constants import UIComponent
 from graph_nodes import ab_variant_node, content_gen_node
-from state import OutreachVariant, SignalReference, coerce_state
+from state import CycleResult, OutreachVariant, SignalReference, coerce_state
 
 
 def _signal(source_type: str, quote: str, confidence: float) -> SignalReference:
@@ -192,6 +193,82 @@ class TestContentGenNode:
             assert variant.hook.strip()
             assert variant.cta.strip()
 
+    @pytest.mark.asyncio
+    async def test_passes_preferred_angle_to_generation_from_campaign_history(
+        self,
+        state_with_signals: dict[str, Any],
+        generated_variants: list[OutreachVariant],
+    ):
+        state_with_signals["campaign_history"] = [
+            CycleResult(
+                cycle_n=1,
+                top_signal="Outcome proof",
+                winning_variant="Variant B",
+                open_rate=0.42,
+                reply_rate=0.21,
+                angle="roi",
+            ).model_dump(),
+            CycleResult(
+                cycle_n=2,
+                top_signal="Buyer skepticism",
+                winning_variant="Variant A",
+                open_rate=0.45,
+                reply_rate=0.24,
+                angle="roi",
+            ).model_dump(),
+        ]
+
+        generation_mock = AsyncMock(return_value=generated_variants)
+        with patch.object(graph_nodes, "_generate_variants_with_llm", generation_mock):
+            await content_gen_node(state_with_signals)
+
+        kwargs = generation_mock.await_args.kwargs
+        assert kwargs.get("preferred_angle") == "roi"
+        assert "winner trend" in str(kwargs.get("learning_brief", "")).lower()
+
+
+class TestLearningBiasHelpers:
+    def test_infer_winning_angle_prefers_recent_high_reply_rate(self):
+        history = [
+            CycleResult(
+                cycle_n=1,
+                top_signal="Comp gap",
+                winning_variant="A",
+                open_rate=0.39,
+                reply_rate=0.11,
+                angle="competitor_gap",
+            ),
+            CycleResult(
+                cycle_n=2,
+                top_signal="Outcome",
+                winning_variant="B",
+                open_rate=0.46,
+                reply_rate=0.22,
+                angle="roi",
+            ),
+            CycleResult(
+                cycle_n=3,
+                top_signal="Outcome again",
+                winning_variant="B",
+                open_rate=0.48,
+                reply_rate=0.24,
+                angle="roi",
+            ),
+        ]
+
+        preferred = graph_nodes._infer_winning_angle(history)
+        assert preferred == "roi"
+
+    def test_fallback_variants_prioritize_preferred_angle(self):
+        signals = [
+            _signal("competitor", "Competitor over-indexes on volume", 0.9),
+            _signal("audience", "Need better pipeline outcomes", 0.86),
+        ]
+
+        variants = graph_nodes._fallback_variants(signals, preferred_angle="roi")
+        assert len(variants) == 2
+        assert variants[0].hypothesis.lower().startswith("roi framing")
+
 
 class TestABVariantNode:
     @pytest.mark.asyncio
@@ -222,11 +299,11 @@ class TestABVariantNode:
         await ab_variant_node(state_with_signals)
 
         assert any(
-            evt.get("type") == "ui_render" and evt.get("component") == "ABVariantGrid"
+            evt.get("type") == "ui_render" and evt.get("component") == UIComponent.AB_GRID
             for evt in emitted
         )
         assert any(
-            evt.get("type") == "ui_render" and evt.get("component") == "ChannelIntentPicker"
+            evt.get("type") == "ui_render" and evt.get("component") == UIComponent.CHANNEL_PICKER
             for evt in emitted
         )
 

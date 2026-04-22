@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from constants import ROUTE_END, ROUTE_LOOP_BACK
 from graph_nodes import feedback_ingestor_node, route_after_feedback
 from state import SignalReference
 
@@ -186,11 +187,11 @@ class TestFeedbackIngestor:
 class TestConditionalEdge:
     def test_returns_market_intelligence_when_loop_stage_is_research(self):
         state = {"loop_stage": "research"}
-        assert route_after_feedback(state) == "market_intelligence"
+        assert route_after_feedback(state) == ROUTE_LOOP_BACK
 
     def test_returns_end_when_loop_stage_is_not_research(self):
         state = {"loop_stage": "feedback"}
-        assert route_after_feedback(state) == "end"
+        assert route_after_feedback(state) == ROUTE_END
 
     @pytest.mark.asyncio
     async def test_campaign_history_not_cleared_across_two_cycles(self, feedback_state_template: dict[str, Any]):

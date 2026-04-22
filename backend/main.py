@@ -52,6 +52,22 @@ def _unwrap_graph_event(event: Any) -> tuple[str, Any]:
     return "custom", event
 
 
+_TRANSIENT_CHECKPOINTER_PATTERNS: tuple[str, ...] = (
+    "connection is closed",
+    "server closed the connection unexpectedly",
+    "consuming input failed",
+    "terminating connection",
+    "connection not open",
+    "broken pipe",
+    "could not receive data from server",
+)
+
+
+def _is_transient_checkpointer_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(pattern in message for pattern in _TRANSIENT_CHECKPOINTER_PATTERNS)
+
+
 @app.get("/")
 def read_root() -> dict[str, str]:
     return {"status": "Vector Agents API is running!"}
@@ -64,7 +80,7 @@ async def start_loop(body: LoopStartRequest):
         initial_state = empty_agent_state(message=body.message, thread_id=body.thread_id)
 
         try:
-            for attempt in range(2):
+            for attempt in range(3):
                 compiled_graph = await get_compiled_graph()
                 try:
                     async for event in compiled_graph.astream(
@@ -82,8 +98,7 @@ async def start_loop(body: LoopStartRequest):
                         yield _sse_line(typed_event)
                     break
                 except Exception as exc:
-                    message = str(exc).lower()
-                    if "connection is closed" in message and attempt == 0:
+                    if _is_transient_checkpointer_error(exc) and attempt < 2:
                         await reset_compiled_graph()
                         continue
                     raise
@@ -131,29 +146,42 @@ async def inject_action(body: LoopActionRequest):
         update_state["route_hint"] = "outreach"
 
     events: list[dict[str, Any]] = []
-    for attempt in range(2):
-        compiled_graph = await get_compiled_graph()
-        try:
-            async for event in compiled_graph.astream(
-                update_state,
-                config=config,
-                stream_mode=["custom"],
-            ):
-                mode, payload = _unwrap_graph_event(event)
-                if mode != "custom":
+    try:
+        for attempt in range(3):
+            compiled_graph = await get_compiled_graph()
+            try:
+                async for event in compiled_graph.astream(
+                    update_state,
+                    config=config,
+                    stream_mode=["custom"],
+                ):
+                    mode, payload = _unwrap_graph_event(event)
+                    if mode != "custom":
+                        continue
+                    try:
+                        typed_event = normalize_event(payload)
+                        events.append(typed_event.model_dump())
+                    except Exception:
+                        continue
+                break
+            except Exception as exc:
+                if _is_transient_checkpointer_error(exc) and attempt < 2:
+                    await reset_compiled_graph()
                     continue
-                try:
-                    typed_event = normalize_event(payload)
-                    events.append(typed_event.model_dump())
-                except Exception:
-                    continue
-            break
-        except Exception as exc:
-            message = str(exc).lower()
-            if "connection is closed" in message and attempt == 0:
-                await reset_compiled_graph()
-                continue
-            raise
+                raise
+    except Exception as exc:
+        warning = WarningEvent(
+            type="warning",
+            message=f"Action failed temporarily: {str(exc)}",
+            fallback_used=True,
+        )
+        return {
+            "status": "degraded",
+            "thread_id": body.thread_id,
+            "applied_action": body.action_type,
+            "event_count": 1,
+            "latest_events": [warning.model_dump()],
+        }
 
     return {
         "status": "ok",

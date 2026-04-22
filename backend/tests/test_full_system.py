@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import graph_nodes
+from constants import UIComponent, UI_COMPONENT_VALUES
 from graph_nodes import intent_router_node
 from main import app
 from state import AgentState, OutreachVariant, SignalReference, empty_agent_state
@@ -260,16 +261,11 @@ class TestSSEEvents:
     def test_ui_render_event_valid_component(self):
         event = UIRenderEvent(
             type="ui_render",
-            component="ABVariantGrid",
+            component=UIComponent.AB_GRID,
             props={"variants": []},
             cycle_n=0,
         )
-        valid_components = [
-            "SignalIntelligenceBoard",
-            "ABVariantGrid",
-            "ChannelIntentPicker",
-            "FeedbackPanel",
-        ]
+        valid_components = list(UI_COMPONENT_VALUES)
         assert event.component in valid_components
 
     def test_loop_complete_event_next_actions(self):
@@ -372,13 +368,13 @@ class TestGoldenPathSSE:
         "audience_node",
         "pestel_node",
         "signal_found",
-        "SignalIntelligenceBoard",
+        UIComponent.SIGNAL_BOARD,
         "content_gen",
         "ab_variant",
-        "ABVariantGrid",
-        "ChannelIntentPicker",
+        UIComponent.AB_GRID,
+        UIComponent.CHANNEL_PICKER,
         "outreach",
-        "FeedbackPanel",
+        UIComponent.FEEDBACK_PANEL,
         "feedback_ingestor",
         "loop_complete",
     ]
@@ -484,12 +480,7 @@ class TestGoldenPathSSE:
             "Write outreach variants for VP Sales targeting"
         )
         ui_events = [e for e in events if e.get("type") == "ui_render"]
-        valid = {
-            "SignalIntelligenceBoard",
-            "ABVariantGrid",
-            "ChannelIntentPicker",
-            "FeedbackPanel",
-        }
+        valid = set(UI_COMPONENT_VALUES)
         for evt in ui_events:
             assert evt.get("component") in valid, f"Unknown component: {evt.get('component')}"
 
