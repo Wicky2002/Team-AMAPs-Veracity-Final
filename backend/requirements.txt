@@ -9,6 +9,7 @@ instructor==1.15.1
 httpx==0.25.2
 langgraph==1.1.2
 langchain-anthropic==1.4.1
+langchain-ollama==0.3.3
 beautifulsoup4==4.14.2
 sentence-transformers==5.4.1
 langgraph-checkpoint-postgres==3.0.5

@@ -6,22 +6,39 @@ export const dynamic = 'force-dynamic';
 const BACKEND_URL = process.env.BACKEND_URL ?? 'http://127.0.0.1:8000';
 
 export async function POST(request: NextRequest) {
-  const payload = await request.json();
+  try {
+    const payload = await request.json();
 
-  const upstream = await fetch(`${BACKEND_URL}/loop/action`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-    cache: 'no-store',
-  });
+    const upstream = await fetch(`${BACKEND_URL}/loop/action`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+      cache: 'no-store',
+    });
 
-  const data = await upstream.json().catch(() => ({ error: 'Invalid upstream response' }));
+    const contentType = upstream.headers.get('content-type') ?? '';
+    const data = contentType.includes('application/json')
+      ? await upstream.json().catch(() => ({ error: 'Invalid JSON from backend /loop/action' }))
+      : {
+          error: 'Non-JSON response from backend /loop/action',
+          detail: (await upstream.text()).slice(0, 400),
+        };
 
-  if (!upstream.ok) {
-    return Response.json(data, { status: upstream.status });
+    if (!upstream.ok) {
+      return Response.json(data, { status: upstream.status });
+    }
+
+    return Response.json(data, { status: 200 });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : 'Unknown proxy error';
+    return Response.json(
+      {
+        error: 'Unable to reach backend /loop/action',
+        detail: reason,
+      },
+      { status: 502 },
+    );
   }
-
-  return Response.json(data, { status: 200 });
 }

@@ -4,6 +4,7 @@ export const UI_COMPONENT = {
   CHANNEL_PICKER: 'ChannelIntentPicker',
   FEEDBACK_PANEL: 'FeedbackPanel',
   STALE_WARNING: 'StaleWarning',
+  COMPARISON_CARD: 'ComparisonCard',
 } as const;
 
 export type UIRenderComponent = (typeof UI_COMPONENT)[keyof typeof UI_COMPONENT];
@@ -21,6 +22,7 @@ const ALIAS_TO_COMPONENT: Record<string, UIRenderComponent> = {
   channel_intent_picker: UI_COMPONENT.CHANNEL_PICKER,
   feedback_panel: UI_COMPONENT.FEEDBACK_PANEL,
   stale_warning: UI_COMPONENT.STALE_WARNING,
+  comparison_card: UI_COMPONENT.COMPARISON_CARD,
 };
 
 export const UI_COMPONENT_ALIAS_MAP: Readonly<Record<string, UIRenderComponent>> = ALIAS_TO_COMPONENT;

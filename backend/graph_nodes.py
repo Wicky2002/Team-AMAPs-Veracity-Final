@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from typing import Any, Literal
 
 import httpx
@@ -25,6 +26,7 @@ except Exception:  # pragma: no cover - optional dependency guard
 
 from constants import ROUTE_END, ROUTE_LOOP_BACK, UIComponent
 from events import LoopCompleteEvent, NodeStartedEvent, SignalFoundEvent, UIRenderEvent, WarningEvent
+from geo_context import detect_geo_context, get_geo_terms
 from intent_router import detect_intent
 from mcp_tools import TARGETS, get_last_pestel_error, scan_audience_intent, scan_pestel_trends, scrape_competitor
 from persistence import load_ab_results, load_signal_cache, save_ab_results, save_signal_cache
@@ -311,8 +313,131 @@ def _copy_signal(signal: SignalReference) -> SignalReference:
     return SignalReference.model_validate(signal.model_dump())
 
 
-def _select_top_signals(signals: list[SignalReference], limit: int = 5) -> list[SignalReference]:
-    return sorted(signals, key=lambda sig: sig.confidence, reverse=True)[:limit]
+def _signal_search_text(signal: SignalReference) -> str:
+    return " ".join(
+        [
+            signal.source_type,
+            signal.source,
+            signal.source_url or "",
+            signal.content,
+            signal.quote,
+            signal.raw_quote,
+        ]
+    ).lower()
+
+
+def _normalized_terms(text: str) -> set[str]:
+    return {token for token in re.findall(r"[a-z0-9]{3,}", (text or "").lower())}
+
+
+def _geo_match_score(signal: SignalReference, query_context: str) -> float:
+    geo = detect_geo_context(query_context)
+    if geo is None:
+        return 0.6
+
+    signal_text = _signal_search_text(signal)
+    terms = get_geo_terms(query_context)
+    if any(term in signal_text for term in terms):
+        return 1.0
+    return 0.2
+
+
+def _source_quality_score(signal: SignalReference) -> float:
+    base_scores = {
+        "competitor": 0.78,
+        "audience": 0.72,
+        "pestel": 0.74,
+    }
+    return base_scores.get(signal.source_type, 0.65)
+
+
+def _recency_score(signal: SignalReference) -> float:
+    url = (signal.source_url or "").lower()
+    if not url:
+        return 0.5
+
+    years = [int(match) for match in re.findall(r"20\d{2}", url)]
+    if not years:
+        return 0.55
+
+    latest = max(years)
+    if latest >= 2025:
+        return 0.9
+    if latest >= 2023:
+        return 0.75
+    return 0.6
+
+
+def _corroboration_score(signal: SignalReference, all_signals: list[SignalReference]) -> float:
+    this_terms = _normalized_terms(f"{signal.raw_quote} {signal.content}")
+    if not this_terms:
+        return 0.4
+
+    strongest_overlap = 0
+    for other in all_signals:
+        if other is signal or other.source_type == signal.source_type:
+            continue
+
+        other_terms = _normalized_terms(f"{other.raw_quote} {other.content}")
+        overlap = len(this_terms.intersection(other_terms))
+        strongest_overlap = max(strongest_overlap, overlap)
+
+    if strongest_overlap >= 4:
+        return 0.95
+    if strongest_overlap >= 2:
+        return 0.8
+    if strongest_overlap >= 1:
+        return 0.65
+    return 0.4
+
+
+def _signal_rank_score(signal: SignalReference, all_signals: list[SignalReference], query_context: str) -> float:
+    relevance = max(0.0, min(float(signal.confidence), 1.0))
+    geo_match = _geo_match_score(signal, query_context)
+    source_quality = _source_quality_score(signal)
+    recency = _recency_score(signal)
+    corroboration = _corroboration_score(signal, all_signals)
+
+    return (
+        0.35 * relevance
+        + 0.25 * geo_match
+        + 0.20 * source_quality
+        + 0.10 * recency
+        + 0.10 * corroboration
+    )
+
+
+def _select_top_signals(
+    signals: list[SignalReference],
+    limit: int = 5,
+    query_context: str = "",
+) -> list[SignalReference]:
+    if limit <= 0:
+        return []
+
+    ranked = sorted(
+        signals,
+        key=lambda sig: _signal_rank_score(sig, signals, query_context),
+        reverse=True,
+    )
+    selected: list[SignalReference] = []
+
+    # Keep cross-source visibility so one source cannot crowd out the board.
+    for source_type in ("competitor", "audience", "pestel"):
+        preferred = next((sig for sig in ranked if sig.source_type == source_type and sig not in selected), None)
+        if preferred is not None:
+            selected.append(preferred)
+        if len(selected) >= limit:
+            return selected[:limit]
+
+    for signal in ranked:
+        if signal in selected:
+            continue
+        selected.append(signal)
+        if len(selected) >= limit:
+            break
+
+    return selected[:limit]
 
 
 def _fallback_competitor_signals(message: str) -> list[SignalReference]:
@@ -339,32 +464,85 @@ def _fallback_competitor_signals(message: str) -> list[SignalReference]:
     ]
 
 
-def _fallback_pestel_signals() -> list[SignalReference]:
+def _fallback_pestel_signals(message: str = "") -> list[SignalReference]:
+    geo = detect_geo_context(message)
+    if geo is not None:
+        signal_text = (
+            f"{geo.country_name} GTM teams are cost-sensitive and increasingly prioritize measurable "
+            "pipeline impact over send-volume metrics."
+        )
+    else:
+        signal_text = "AI SDR market interest remains elevated with clear demand for measurable pipeline outcomes."
+
     return [
         SignalReference(
             source_type="pestel",
             source="google_trends",
             source_url="https://trends.google.com/",
-            content="AI SDR market interest remains elevated with clear demand for measurable pipeline outcomes.",
-            quote="AI SDR market interest remains elevated with clear demand for measurable pipeline outcomes.",
+            content=signal_text,
+            quote=signal_text,
             confidence=0.71,
-            raw_quote="AI SDR market interest remains elevated with clear demand for measurable pipeline outcomes.",
+            raw_quote=signal_text,
         )
     ]
 
 
-def _fallback_audience_signals() -> list[SignalReference]:
+def _fallback_audience_signals(message: str = "") -> list[SignalReference]:
+    geo = detect_geo_context(message)
+    if geo is not None:
+        signal_text = (
+            f"{geo.country_name} B2B sellers ask for practical, budget-aware personalization "
+            "that improves reply quality."
+        )
+    else:
+        signal_text = "Leaders are tired of generic personalization and fake context."
+
     return [
         SignalReference(
             source_type="audience",
             source="reddit/r/sales",
             source_url="https://reddit.com/r/sales",
-            content="Leaders are tired of generic personalization and fake context.",
-            quote="Leaders are tired of generic personalization and fake context.",
+            content=signal_text,
+            quote=signal_text,
             confidence=0.87,
-            raw_quote="Leaders are tired of generic personalization and fake context.",
+            raw_quote=signal_text,
         )
     ]
+
+
+def _parse_competitor_domains(raw: str) -> list[str]:
+    candidates = [part.strip() for part in (raw or "").split(",")]
+    cleaned = [item for item in candidates if item]
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for domain in cleaned:
+        normalized = domain.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(domain)
+    return deduped
+
+
+def _competitor_targets_for_topic(topic: str) -> list[str]:
+    geo = detect_geo_context(topic)
+    if geo is not None:
+        country_targets = _parse_competitor_domains(os.getenv(f"COMPETITOR_TARGETS_{geo.iso2}", ""))
+        if country_targets:
+            return country_targets
+
+        # Backward compatibility for previous Sri Lanka-specific env key.
+        if geo.iso2 == "LK":
+            sri_lanka_targets = _parse_competitor_domains(os.getenv("COMPETITOR_TARGETS_SRI_LANKA", ""))
+            if sri_lanka_targets:
+                return sri_lanka_targets
+
+    override_targets = _parse_competitor_domains(os.getenv("COMPETITOR_TARGETS", ""))
+    if override_targets:
+        return override_targets
+
+    return list(TARGETS)
 
 
 def _fallback_variant_for_angle(
@@ -493,7 +671,7 @@ def _enrich_variants(
 
 async def _collect_competitor_signals(topic: str) -> list[SignalReference]:
     signals: list[SignalReference] = []
-    for domain in TARGETS:
+    for domain in _competitor_targets_for_topic(topic):
         cached = await load_signal_cache(domain=domain, topic=topic)
         if cached:
             signals.extend(cached)
@@ -944,7 +1122,7 @@ async def market_intelligence_node(state: dict[str, Any]) -> dict[str, Any]:
         )
 
     if not any(signal.source_type == "audience" for signal in signals):
-        signals.extend(_fallback_audience_signals())
+        signals.extend(_fallback_audience_signals(message))
         _emit(
             WarningEvent(
                 type="warning",
@@ -954,7 +1132,7 @@ async def market_intelligence_node(state: dict[str, Any]) -> dict[str, Any]:
         )
 
     if not any(signal.source_type == "pestel" for signal in signals):
-        signals.extend(_fallback_pestel_signals())
+        signals.extend(_fallback_pestel_signals(message))
         pestel_reason = get_last_pestel_error()
         pestel_message = "PESTEL scan returned no results; fallback macro signals used."
         if pestel_reason:
@@ -967,7 +1145,7 @@ async def market_intelligence_node(state: dict[str, Any]) -> dict[str, Any]:
             )
         )
 
-    signals = _select_top_signals(signals, limit=12)
+    signals = _select_top_signals(signals, limit=12, query_context=message)
 
     for signal in signals:
         _emit(
@@ -1005,7 +1183,7 @@ async def content_gen_node(state: dict[str, Any]) -> dict[str, Any]:
     state_model = coerce_state(state)
     _emit(NodeStartedEvent(type="node_started", node="content_gen", cycle_n=state_model.cycle_n))
 
-    top_signals = _select_top_signals(state_model.signals, limit=5)
+    top_signals = _select_top_signals(state_model.signals, limit=5, query_context=state_model.message)
     preferred_angle = _infer_winning_angle(state_model.campaign_history)
     learning_brief = _build_learning_brief(state_model.campaign_history, preferred_angle)
     provider = _get_llm_provider()
@@ -1046,11 +1224,116 @@ async def content_gen_node(state: dict[str, Any]) -> dict[str, Any]:
     return next_state
 
 
+def _build_comparison_card(
+    signals: list[SignalReference],
+    variants: list[OutreachVariant],
+) -> dict[str, Any]:
+    """Build comparison card data from competitor signals and generated variants."""
+    competitors: list[dict[str, Any]] = []
+
+    # Lilian (our product) — always first
+    lilian_strengths: list[str] = []
+    for variant in variants[:2]:
+        if variant.hypothesis:
+            lilian_strengths.append(variant.hypothesis[:120])
+    if not lilian_strengths:
+        lilian_strengths = ["Signal-driven outreach", "Full-loop campaign automation"]
+    lilian_strengths = lilian_strengths[:3]
+
+    competitors.append(
+        {
+            "name": "Lilian (Vector Agents)",
+            "tagline": "Signal-driven AI SDR with closed-loop learning",
+            "strengths": lilian_strengths + ["Provenance-traced copy", "A/B hypothesis testing"],
+            "weaknesses": ["Newer entrant in the market"],
+            "highlight": True,
+        }
+    )
+
+    # Extract competitor entries from signals
+    seen_domains: set[str] = set()
+    for signal in signals:
+        if signal.source_type != "competitor":
+            continue
+
+        domain = signal.source.lower().strip()
+        if domain in seen_domains:
+            continue
+        seen_domains.add(domain)
+
+        display_name = domain.replace(".co", "").replace(".ai", "").replace(".com", "").title()
+        tagline = signal.raw_quote[:100] if signal.raw_quote else "AI-powered SDR platform"
+
+        strengths: list[str] = []
+        weaknesses: list[str] = []
+
+        content_lower = (signal.content or "").lower()
+        if "automat" in content_lower or "volume" in content_lower:
+            strengths.append("High-volume automation")
+            weaknesses.append("Limited reply quality optimization")
+        if "person" in content_lower:
+            strengths.append("Personalization features")
+            weaknesses.append("Generic context insertion")
+        if "email" in content_lower:
+            strengths.append("Email campaign tooling")
+            weaknesses.append("Limited multi-channel transparency")
+
+        if not strengths:
+            strengths = ["Established market presence", "Brand recognition"]
+        if not weaknesses:
+            weaknesses = ["Volume-over-quality approach", "No closed-loop learning"]
+
+        competitors.append(
+            {
+                "name": display_name,
+                "tagline": tagline[:100],
+                "strengths": strengths[:3],
+                "weaknesses": weaknesses[:3],
+                "highlight": False,
+            }
+        )
+
+    # Ensure at least 3 entries for a meaningful comparison
+    defaults = [
+        {
+            "name": "Artisan",
+            "tagline": "Autonomous AI BDR — Hire Ava",
+            "strengths": ["All-in-one platform", "Autonomous prospecting"],
+            "weaknesses": ["Volume-first approach", "Limited signal transparency"],
+            "highlight": False,
+        },
+        {
+            "name": "11x",
+            "tagline": "AI workers that scale your go-to-market",
+            "strengths": ["Strong email automation", "Enterprise positioning"],
+            "weaknesses": ["Limited cross-channel transparency", "No closed-loop feedback"],
+            "highlight": False,
+        },
+    ]
+    existing_names = {c["name"].lower() for c in competitors}
+    for default in defaults:
+        if default["name"].lower() not in existing_names and len(competitors) < 4:
+            competitors.append(default)
+
+    # Summary insight from audience/PESTEL signals
+    audience_insight = next(
+        (s.raw_quote for s in signals if s.source_type in {"audience", "pestel"}),
+        "B2B teams prioritize measurable pipeline outcomes over send-volume metrics.",
+    )
+
+    return {
+        "title": "AI SDR Competitive Landscape",
+        "subtitle": "Live signal comparison — generated from real-time market data",
+        "competitors": competitors[:4],
+        "market_insight": audience_insight[:200],
+    }
+
+
 async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
     state_model = coerce_state(state)
     _emit(NodeStartedEvent(type="node_started", node="ab_variant", cycle_n=state_model.cycle_n))
 
-    top_signals = _select_top_signals(state_model.signals, limit=5)
+    top_signals = _select_top_signals(state_model.signals, limit=5, query_context=state_model.message)
     preferred_angle = _infer_winning_angle(state_model.campaign_history)
     source_variants = state_model.variants or _fallback_variants(top_signals, preferred_angle=preferred_angle)
     variants = _enrich_variants(source_variants, top_signals, preferred_angle=preferred_angle)
@@ -1071,6 +1354,17 @@ async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
             type="ui_render",
             component=UIComponent.CHANNEL_PICKER,
             props={"selected": state_model.outreach_channel},
+            cycle_n=state_model.cycle_n,
+        )
+    )
+
+    # Emit a downloadable comparison card from competitor signals
+    comparison_card = _build_comparison_card(state_model.signals, variants)
+    _emit(
+        UIRenderEvent(
+            type="ui_render",
+            component=UIComponent.COMPARISON_CARD,
+            props=comparison_card,
             cycle_n=state_model.cycle_n,
         )
     )

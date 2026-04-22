@@ -5,6 +5,7 @@ import { useRef, useState } from 'react';
 import { ABVariantGrid } from '@/components/ABVariantGrid';
 import { CampaignTimeline } from '@/components/CampaignTimeline';
 import { ChannelIntentPicker } from '@/components/ChannelIntentPicker';
+import { ComparisonCard } from '@/components/ComparisonCard';
 import { FeedbackPanel } from '@/components/FeedbackPanel';
 import { SignalIntelligenceBoard } from '@/components/SignalIntelligenceBoard';
 import type { FeedbackMetric, OutreachVariant, SSEEvent, SignalReference, TimelineEntry } from '@/lib/loop-types';
@@ -257,38 +258,88 @@ export default function Home() {
     setStatus('done');
   };
 
+  const emitActionWarning = (message: string) => {
+    const warningEvent: SSEEvent = {
+      type: 'warning',
+      message,
+      fallback_used: true,
+    };
+
+    appendEvent(JSON.stringify(warningEvent));
+    applyTypedEvent(warningEvent);
+    setStatus('error');
+  };
+
+  const extractActionErrorMessage = (payload: unknown): string | null => {
+    if (!isRecord(payload)) {
+      return null;
+    }
+
+    if (typeof payload.error === 'string' && payload.error.trim()) {
+      return payload.error;
+    }
+
+    if (typeof payload.detail === 'string' && payload.detail.trim()) {
+      return payload.detail;
+    }
+
+    if (Array.isArray(payload.detail) && payload.detail.length > 0) {
+      try {
+        return JSON.stringify(payload.detail);
+      } catch {
+        return 'Unknown backend validation error';
+      }
+    }
+
+    return null;
+  };
+
   const sendAction = async (action_type: 'feedback' | 'channel_select' | 'deploy_variant', payload: Record<string, unknown>) => {
     const activeThreadId = resolveThreadId();
 
-    const response = await fetch('/api/loop/action', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        thread_id: activeThreadId,
-        action_type,
-        payload,
-      }),
-    });
+    try {
+      const response = await fetch('/api/loop/action', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          thread_id: activeThreadId,
+          action_type,
+          payload,
+        }),
+      });
 
-    const actionResult = (await response.json().catch(() => null)) as
-      | {
-          latest_events?: unknown[];
-        }
-      | null;
+      const actionResult = (await response.json().catch(() => null)) as
+        | {
+            latest_events?: unknown[];
+            error?: unknown;
+            detail?: unknown;
+          }
+        | null;
 
-    if (!actionResult || !Array.isArray(actionResult.latest_events)) {
-      return;
-    }
-
-    for (const event of actionResult.latest_events) {
-      if (!isSSEEvent(event)) {
-        continue;
+      if (!response.ok) {
+        const reason = extractActionErrorMessage(actionResult) ?? `HTTP ${response.status}`;
+        emitActionWarning(`Action request failed. ${reason}`);
+        return;
       }
 
-      appendEvent(JSON.stringify(event));
-      applyTypedEvent(event);
+      if (!actionResult || !Array.isArray(actionResult.latest_events)) {
+        emitActionWarning('Action completed, but the backend returned no renderable events.');
+        return;
+      }
+
+      for (const event of actionResult.latest_events) {
+        if (!isSSEEvent(event)) {
+          continue;
+        }
+
+        appendEvent(JSON.stringify(event));
+        applyTypedEvent(event);
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'Unknown network error';
+      emitActionWarning(`Could not reach action endpoint. ${reason}`);
     }
   };
 
@@ -361,6 +412,16 @@ export default function Home() {
             >
               {typeof event.props.message === 'string' ? event.props.message : 'Signals may be stale.'}
             </div>
+          );
+        case UI_COMPONENT.COMPARISON_CARD:
+          return (
+            <ComparisonCard
+              key={`ui-comparison-${index}`}
+              title={typeof event.props.title === 'string' ? event.props.title : 'AI SDR Competitive Landscape'}
+              subtitle={typeof event.props.subtitle === 'string' ? event.props.subtitle : 'Comparison'}
+              competitors={Array.isArray(event.props.competitors) ? (event.props.competitors as { name: string; tagline: string; strengths: string[]; weaknesses: string[]; highlight?: boolean }[]) : []}
+              market_insight={typeof event.props.market_insight === 'string' ? event.props.market_insight : ''}
+            />
           );
         default:
           return null;

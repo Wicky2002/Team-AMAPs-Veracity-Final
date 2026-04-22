@@ -11,6 +11,7 @@ class UIComponent:
     CHANNEL_PICKER = "ChannelIntentPicker"
     FEEDBACK_PANEL = "FeedbackPanel"
     STALE_WARNING = "StaleWarning"
+    COMPARISON_CARD = "ComparisonCard"
 
 
 UI_COMPONENT_VALUES = (
@@ -19,6 +20,7 @@ UI_COMPONENT_VALUES = (
     UIComponent.CHANNEL_PICKER,
     UIComponent.FEEDBACK_PANEL,
     UIComponent.STALE_WARNING,
+    UIComponent.COMPARISON_CARD,
 )
 UI_COMPONENT_SET = set(UI_COMPONENT_VALUES)
 
@@ -31,6 +33,7 @@ UI_COMPONENT_ALIASES: dict[str, str] = {
     "channel_intent_picker": UIComponent.CHANNEL_PICKER,
     "feedback_panel": UIComponent.FEEDBACK_PANEL,
     "stale_warning": UIComponent.STALE_WARNING,
+    "comparison_card": UIComponent.COMPARISON_CARD,
 }
 
 

@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from psycopg import OperationalError
 
 # ─── SETUP ───────────────────────────────────────────────────────────────────
 
@@ -346,6 +347,75 @@ class TestAPIEndpoints:
         response = client.post("/loop/action", json=payload)
         assert response.status_code == 200
         assert response.json().get("status") == "ok"
+
+    def test_loop_action_returns_degraded_when_checkpointer_disconnects(self):
+        payload = {
+            "thread_id": _thread_id("feedback-degraded"),
+            "action_type": "feedback",
+            "payload": {
+                "note": "The ROI angle got 3x the reply rate",
+                "angle": "roi",
+                "reply_rate": 0.18,
+                "open_rate": 0.49,
+                "winning_variant": "Variant B",
+            },
+        }
+
+        disconnect_error = OperationalError(
+            "consuming input failed: server closed the connection unexpectedly"
+        )
+
+        class _BrokenGraph:
+            async def astream(self, *args, **kwargs):
+                raise disconnect_error
+                if False:
+                    yield None
+
+        broken_graph = _BrokenGraph()
+
+        with patch("main.get_compiled_graph", new=AsyncMock(return_value=broken_graph)), patch(
+            "main.reset_compiled_graph", new=AsyncMock(return_value=None)
+        ):
+            response = client.post("/loop/action", json=payload)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body.get("status") == "degraded"
+        assert body.get("event_count") == 1
+        latest = body.get("latest_events", [])
+        assert isinstance(latest, list) and latest
+        warning = latest[0]
+        assert warning.get("type") == "warning"
+        assert warning.get("fallback_used") is True
+        assert "server closed the connection unexpectedly" in str(warning.get("message", "")).lower()
+
+    def test_loop_action_returns_degraded_for_unexpected_graph_error(self):
+        payload = {
+            "thread_id": _thread_id("channel-degraded"),
+            "action_type": "channel_select",
+            "payload": {"channel": "LinkedIn"},
+        }
+
+        class _BrokenGraph:
+            async def astream(self, *args, **kwargs):
+                raise RuntimeError("boom")
+                if False:
+                    yield None
+
+        broken_graph = _BrokenGraph()
+
+        with patch("main.get_compiled_graph", new=AsyncMock(return_value=broken_graph)):
+            response = client.post("/loop/action", json=payload)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body.get("status") == "degraded"
+        latest = body.get("latest_events", [])
+        assert isinstance(latest, list) and latest
+        warning = latest[0]
+        assert warning.get("type") == "warning"
+        assert warning.get("fallback_used") is True
+        assert "boom" in str(warning.get("message", ""))
 
     def test_loop_action_rejects_invalid_type(self):
         payload = {

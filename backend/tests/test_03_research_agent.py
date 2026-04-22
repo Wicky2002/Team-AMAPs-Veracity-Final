@@ -208,3 +208,72 @@ class TestParallelResearchNodes:
 
         assert len(typed.signals) == 2
         assert len(set(stale)) == 1
+
+    @pytest.mark.asyncio
+    async def test_signal_selection_keeps_audience_and_pestel_visible_when_competitor_dominates(
+        self,
+        base_state: dict[str, Any],
+    ):
+        heavy_competitor_signals = [
+            _make_signal(
+                "competitor",
+                f"comp-{idx}.example",
+                f"Competitor claim {idx}",
+                0.95 - (idx * 0.01),
+            )
+            for idx in range(12)
+        ]
+        audience = [_make_signal("audience", "reddit/r/srilanka", "Sri Lankan buyers need practical ROI", 0.62)]
+        pestel = [_make_signal("pestel", "google_trends", "Sri Lanka demand remains cost-sensitive", 0.58)]
+
+        with patch.object(graph_nodes, "_collect_competitor_signals", AsyncMock(return_value=heavy_competitor_signals)), patch.object(
+            graph_nodes, "_collect_audience_signals", AsyncMock(return_value=audience)
+        ), patch.object(graph_nodes, "_collect_pestel_signals", AsyncMock(return_value=pestel)):
+            updated = await market_intelligence_node(base_state)
+
+        typed = coerce_state(updated)
+        source_types = {sig.source_type for sig in typed.signals}
+        assert "audience" in source_types
+        assert "pestel" in source_types
+
+    def test_sri_lanka_fallback_signals_include_location_context(self):
+        audience_signals = graph_nodes._fallback_audience_signals("For the Sri Lankan market, how should we position?")
+        pestel_signals = graph_nodes._fallback_pestel_signals("For the Sri Lankan market, how should we position?")
+
+        audience_text = " ".join(f"{sig.content} {sig.quote}" for sig in audience_signals).lower()
+        pestel_text = " ".join(f"{sig.content} {sig.quote}" for sig in pestel_signals).lower()
+
+        assert "sri lanka" in audience_text
+        assert "sri lanka" in pestel_text
+
+    def test_competitor_targets_prefer_sri_lanka_override_when_geo_context_present(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("COMPETITOR_TARGETS_SRI_LANKA", "local-sdr.lk, colombo-ai.com")
+        monkeypatch.setenv("COMPETITOR_TARGETS", "global-default.com")
+
+        targets = graph_nodes._competitor_targets_for_topic("Positioning for Sri Lankan B2B market")
+        assert targets == ["local-sdr.lk", "colombo-ai.com"]
+
+    def test_competitor_targets_prefer_iso_country_override_when_geo_context_present(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("COMPETITOR_TARGETS_IN", "leadzen.ai, prospecting.in")
+        monkeypatch.setenv("COMPETITOR_TARGETS", "global-default.com")
+
+        targets = graph_nodes._competitor_targets_for_topic("Positioning for Indian B2B market")
+        assert targets == ["leadzen.ai", "prospecting.in"]
+
+    def test_geo_reranking_can_prioritize_country_match(self):
+        global_signal = _make_signal("competitor", "global.ai", "Best outbound platform for everyone", 0.9)
+        india_signal = _make_signal("competitor", "india.ai", "Top choice for India enterprise teams", 0.78)
+
+        selected = graph_nodes._select_top_signals(
+            [global_signal, india_signal],
+            limit=1,
+            query_context="AI SDR positioning for India enterprise teams",
+        )
+
+        assert selected[0].source == "india.ai"
