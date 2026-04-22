@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0A0A0A;
+  --foreground: #EDEDED;
 }
 
 @theme inline {
@@ -12,15 +12,78 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
+html,
 body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
+
+/* ── Scrollbar ────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.16); }
+
+/* ── Panel utility ────────────────────────────────── */
+.panel {
+  background: #111111;
+  border: 1px solid rgba(255,255,255,0.06);
+  box-shadow: 0 2px 16px -4px rgba(0,0,0,0.4);
+}
+.panel-hover:hover {
+  border-color: rgba(255,255,255,0.12);
+  background: #141414;
+}
+
+/* ── Glass header ─────────────────────────────────── */
+.glass-bar {
+  background: rgba(10,10,10,0.65);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+/* ── Gradient text ────────────────────────────────── */
+.text-gradient {
+  background: linear-gradient(135deg, #FFF 0%, #999 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* ── Animations ───────────────────────────────────── */
+@keyframes fade-slide-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+
+.anim-in {
+  animation: fade-slide-up 0.35s cubic-bezier(0.16,1,0.3,1) both;
+}
+.anim-pulse {
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+/* ── Confidence bar gradient ──────────────────────── */
+.bar-gradient {
+  background: linear-gradient(90deg, #10b981, #06b6d4);
+}
+
+/* ── Source badges ────────────────────────────────── */
+.badge-competitor { background: rgba(239,68,68,0.12); color: #f87171; }
+.badge-audience   { background: rgba(59,130,246,0.12); color: #60a5fa; }
+.badge-pestel     { background: rgba(245,158,11,0.12); color: #fbbf24; }
