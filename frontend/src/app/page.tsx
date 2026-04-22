@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useRef, useState, useCallback, useEffect } from 'react';
 
 import { ABVariantGrid } from '@/components/ABVariantGrid';
 import { CampaignTimeline } from '@/components/CampaignTimeline';
@@ -11,7 +11,7 @@ import type { FeedbackMetric, OutreachVariant, SSEEvent, SignalReference, Timeli
 import { UI_COMPONENT, normalizeUIRenderComponent } from '@/lib/ui-components';
 
 /* ────────────────────────────────────────────────────
-   Type coercion helpers (unchanged from skeleton)
+   Type coercion helpers (preserved from backend contract)
    ──────────────────────────────────────────────────── */
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -131,17 +131,56 @@ const isSSEEvent = (value: unknown): value is SSEEvent => {
 };
 
 /* ────────────────────────────────────────────────────
-   Stage progress config
+   Stage & tab config
    ──────────────────────────────────────────────────── */
 
-const STAGES = ['research', 'generate', 'ab', 'outreach', 'feedback'] as const;
-const STAGE_LABELS: Record<string, string> = {
+type Stage = 'research' | 'generate' | 'ab' | 'outreach' | 'feedback';
+const STAGES: Stage[] = ['research', 'generate', 'ab', 'outreach', 'feedback'];
+const STAGE_LABELS: Record<Stage, string> = {
   research: 'Research',
   generate: 'Generate',
   ab: 'A/B Test',
   outreach: 'Outreach',
   feedback: 'Feedback',
 };
+const STAGE_ICONS: Record<Stage, string> = {
+  research: '🔍',
+  generate: '✍️',
+  ab: '⚖️',
+  outreach: '📡',
+  feedback: '📊',
+};
+
+const NODE_TO_STAGE: Record<string, Stage> = {
+  intent_router: 'research',
+  market_intelligence: 'research',
+  competitor_node: 'research',
+  audience_node: 'research',
+  pestel_node: 'research',
+  content_gen: 'generate',
+  ab_variant: 'ab',
+  outreach: 'outreach',
+  feedback_ingestor: 'feedback',
+};
+
+const UI_TO_STAGE: Record<string, Stage> = {
+  [UI_COMPONENT.SIGNAL_BOARD]: 'research',
+  [UI_COMPONENT.AB_GRID]: 'ab',
+  [UI_COMPONENT.CHANNEL_PICKER]: 'ab',
+  [UI_COMPONENT.FEEDBACK_PANEL]: 'feedback',
+  [UI_COMPONENT.STALE_WARNING]: 'research',
+};
+
+function tagStage(event: SSEEvent, currentStage: Stage): Stage {
+  if (event.type === 'node_started') return NODE_TO_STAGE[event.node] ?? currentStage;
+  if (event.type === 'signal_found') return 'research';
+  if (event.type === 'ui_render') return UI_TO_STAGE[event.component] ?? currentStage;
+  if (event.type === 'loop_complete') return 'feedback';
+  if (event.type === 'warning') return currentStage;
+  return currentStage;
+}
+
+type TaggedEvent = SSEEvent & { _stage: Stage };
 
 const SUGGESTED = [
   'Is Lilian well-positioned in the AI SDR market?',
@@ -155,16 +194,25 @@ const SUGGESTED = [
 
 export default function Home() {
   const [message, setMessage] = useState('Is Lilian well-positioned in the AI SDR market?');
-  const [events, setEvents] = useState<SSEEvent[]>([]);
+  const [taggedEvents, setTaggedEvents] = useState<TaggedEvent[]>([]);
   const [rawEvents, setRawEvents] = useState<string[]>([]);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [status, setStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
   const [threadId, setThreadId] = useState('');
-  const [currentStage, setCurrentStage] = useState<string>('');
+  const [currentStage, setCurrentStage] = useState<Stage>('research');
+  const [activeTab, setActiveTab] = useState<Stage>('research');
+  const [visitedStages, setVisitedStages] = useState<Set<Stage>>(new Set());
   const [showRawLog, setShowRawLog] = useState(false);
+  const [isDark, setIsDark] = useState(true);
 
   const eventSourceRef = useRef<EventSource | null>(null);
+  const currentStageRef = useRef<Stage>('research');
   const feedRef = useRef<HTMLDivElement>(null);
+
+  // Apply theme class
+  useEffect(() => {
+    document.documentElement.classList.toggle('light', !isDark);
+  }, [isDark]);
 
   const resolveThreadId = () => {
     if (threadId) return threadId;
@@ -177,27 +225,25 @@ export default function Home() {
     setRawEvents((prev) => [raw, ...prev].slice(0, 160));
   };
 
-  const applyTypedEvent = (parsed: SSEEvent) => {
-    setEvents((prev) => [...prev, parsed].slice(-180));
+  const applyTypedEvent = useCallback((parsed: SSEEvent) => {
+    const stage = tagStage(parsed, currentStageRef.current);
 
-    // Track current stage from node_started events
     if (parsed.type === 'node_started') {
-      const nodeMap: Record<string, string> = {
-        intent_router: 'research',
-        market_intelligence: 'research',
-        competitor_node: 'research',
-        audience_node: 'research',
-        pestel_node: 'research',
-        content_gen: 'generate',
-        ab_variant: 'ab',
-        outreach: 'outreach',
-        feedback_ingestor: 'feedback',
-      };
-      setCurrentStage(nodeMap[parsed.node] ?? currentStage);
+      const newStage = NODE_TO_STAGE[parsed.node];
+      if (newStage) {
+        currentStageRef.current = newStage;
+        setCurrentStage(newStage);
+        setActiveTab(newStage);
+        setVisitedStages((prev) => new Set(prev).add(newStage));
+      }
     }
 
-    if (parsed.type === 'ui_render' && parsed.component === UI_COMPONENT.FEEDBACK_PANEL) {
-      const nextTimeline = toTimeline(parsed.props);
+    setTaggedEvents((prev) => [...prev, { ...parsed, _stage: stage }].slice(-250));
+
+    // Update timeline from any event that has campaign_history
+    if (parsed.type === 'ui_render') {
+      const props = parsed.props as Record<string, unknown>;
+      const nextTimeline = toTimeline(props);
       if (nextTimeline.length > 0) setTimeline(nextTimeline);
     }
 
@@ -206,18 +252,20 @@ export default function Home() {
       eventSourceRef.current?.close();
     }
 
-    // Scroll to bottom
     setTimeout(() => feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight, behavior: 'smooth' }), 50);
-  };
+  }, []);
 
   const startLoop = (msg?: string) => {
     const activeMessage = msg ?? message;
     if (!activeMessage.trim()) return;
     eventSourceRef.current?.close();
-    setEvents([]);
+    setTaggedEvents([]);
     setRawEvents([]);
     setTimeline([]);
     setCurrentStage('research');
+    setActiveTab('research');
+    setVisitedStages(new Set(['research']));
+    currentStageRef.current = 'research';
     if (msg) setMessage(msg);
 
     const activeThreadId = resolveThreadId();
@@ -232,7 +280,7 @@ export default function Home() {
         const parsed = JSON.parse(event.data) as unknown;
         if (!isSSEEvent(parsed)) return;
         applyTypedEvent(parsed);
-      } catch { /* ignore malformed */ }
+      } catch { /* ignore */ }
     };
     source.onerror = () => { setStatus('error'); source.close(); };
   };
@@ -258,15 +306,15 @@ export default function Home() {
     }
   };
 
-  /* ── Event rendering ─────────────────────────────── */
+  /* ── Event renderer ──────────────────────────────── */
 
-  const renderEvent = (event: SSEEvent, index: number) => {
+  const renderEvent = (event: TaggedEvent, index: number) => {
     if (event.type === 'node_started') {
       return (
-        <div key={`node-${index}`} className="flex items-center gap-2.5 py-1.5 anim-in">
-          <span className="w-2 h-2 rounded-full bg-emerald-500 anim-pulse shrink-0" />
-          <span className="text-xs text-neutral-500 font-mono">
-            <span className="text-neutral-300">{event.node}</span> · Cycle {event.cycle_n}
+        <div key={`node-${index}`} className="flex items-center gap-2.5 py-2 anim-in">
+          <span className="w-2 h-2 rounded-full bg-[var(--success)] anim-pulse shrink-0" />
+          <span className="text-[13px] text-[var(--text-secondary)] font-mono">
+            <span className="text-[var(--text-primary)]">{event.node}</span> · Cycle {event.cycle_n}
           </span>
         </div>
       );
@@ -279,11 +327,11 @@ export default function Home() {
         pestel: 'badge-pestel',
       };
       return (
-        <div key={`signal-${index}`} className="flex items-start gap-3 py-1.5 anim-in">
-          <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded mt-0.5 shrink-0 ${badgeMap[event.source] ?? 'bg-white/5 text-neutral-400'}`}>
+        <div key={`signal-${index}`} className="flex items-start gap-3 py-2 anim-in">
+          <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded mt-0.5 shrink-0 ${badgeMap[event.source] ?? ''}`}>
             {event.source}
           </span>
-          <p className="text-xs text-neutral-400 leading-relaxed">{event.quote}</p>
+          <p className="text-[13px] text-[var(--text-secondary)] leading-relaxed">{event.quote}</p>
         </div>
       );
     }
@@ -329,7 +377,7 @@ export default function Home() {
           );
         case UI_COMPONENT.STALE_WARNING:
           return (
-            <div key={`ui-stale-${index}`} className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-sm text-amber-300 anim-in">
+            <div key={`ui-stale-${index}`} className="rounded-lg border border-[var(--warning)] bg-[var(--warning-soft)] p-3 text-sm text-[var(--warning)] anim-in">
               ⚠️ {typeof event.props.message === 'string' ? event.props.message : 'Signals may be stale.'}
             </div>
           );
@@ -340,89 +388,111 @@ export default function Home() {
 
     if (event.type === 'warning') {
       return (
-        <div key={`warning-${index}`} className="rounded-lg border border-amber-500/20 bg-amber-500/[0.06] p-3 text-sm text-amber-200 anim-in">
+        <div key={`warning-${index}`} className="rounded-lg border border-[var(--warning)] bg-[var(--warning-soft)] p-3.5 text-[13px] text-[var(--warning)] anim-in">
           ⚠️ {event.message}
-          {event.fallback_used && <span className="ml-2 text-xs text-amber-500 opacity-70">Fallback used</span>}
+          {event.fallback_used && <span className="ml-2 text-[11px] opacity-60">Fallback used</span>}
         </div>
       );
     }
 
     if (event.type === 'loop_complete') {
       return (
-        <div key={`complete-${index}`} className="rounded-lg border border-emerald-500/20 bg-emerald-500/[0.05] p-3 text-sm text-emerald-300 anim-in">
+        <div key={`complete-${index}`} className="rounded-lg border border-[var(--success)] bg-[var(--success-soft)] p-3.5 text-[13px] text-[var(--success)] anim-in">
           ✓ Loop complete — Cycle {event.cycle_n} · Next: <span className="font-mono font-semibold">{event.next_action}</span>
         </div>
       );
     }
-
     return null;
   };
 
+  /* ── Filter events for active tab ────────────────── */
+  const filteredEvents = taggedEvents.filter((e) => e._stage === activeTab);
+
   /* ── Status badge ────────────────────────────────── */
   const statusConfig: Record<string, { dot: string; text: string; label: string }> = {
-    idle: { dot: 'bg-neutral-500', text: 'text-neutral-500', label: 'Ready' },
-    running: { dot: 'bg-emerald-500 anim-pulse', text: 'text-emerald-400', label: 'Running' },
-    done: { dot: 'bg-blue-500', text: 'text-blue-400', label: 'Complete' },
-    error: { dot: 'bg-red-500', text: 'text-red-400', label: 'Error' },
+    idle:    { dot: 'bg-[var(--text-muted)]', text: 'text-[var(--text-muted)]', label: 'Ready' },
+    running: { dot: 'bg-[var(--success)] anim-pulse', text: 'text-[var(--success)]', label: 'Running' },
+    done:    { dot: 'bg-[var(--accent)]', text: 'text-[var(--accent)]', label: 'Complete' },
+    error:   { dot: 'bg-[var(--error)]', text: 'text-[var(--error)]', label: 'Error' },
   };
   const sc = statusConfig[status];
+
+  const eventCounts: Record<Stage, number> = { research: 0, generate: 0, ab: 0, outreach: 0, feedback: 0 };
+  for (const e of taggedEvents) eventCounts[e._stage]++;
 
   /* ── Render ──────────────────────────────────────── */
 
   return (
     <div className="flex flex-col h-screen overflow-hidden relative">
-      {/* Ambient glow */}
-      <div className="absolute top-[-10%] left-[15%] w-[600px] h-[500px] bg-emerald-600/[0.03] blur-[120px] rounded-full pointer-events-none" />
 
       {/* ── Header ───────────────────────────────────── */}
-      <header className="glass-bar px-6 py-3.5 flex items-center justify-between z-20 shrink-0">
+      <header className="glass-bar px-6 py-3 flex items-center justify-between z-20 shrink-0">
         <div className="flex items-center gap-3">
-          <div className="w-7 h-7 rounded-md bg-white flex items-center justify-center">
-            <span className="text-black font-bold text-[10px] tracking-tight">Vx</span>
+          <div className="w-7 h-7 rounded-md bg-[var(--accent)] flex items-center justify-center">
+            <span className="text-[var(--bg-base)] font-bold text-[10px] tracking-tight">Vx</span>
           </div>
           <div>
-            <h1 className="text-sm font-semibold text-white">Veracity Workspace</h1>
-            <p className="text-[10px] text-neutral-500 font-mono">Signal → Action Growth Loop</p>
+            <h1 className="text-sm font-semibold text-[var(--text-primary)]">Veracity Workspace</h1>
+            <p className="text-[10px] text-[var(--text-muted)] font-mono">Signal → Action Growth Loop</p>
           </div>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
           {/* Status badge */}
           <div className={`flex items-center gap-1.5 text-[11px] font-mono ${sc.text}`}>
             <span className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />
             {sc.label}
           </div>
 
-          {/* Thread ID */}
           {threadId && (
-            <code className="text-[10px] text-neutral-600 font-mono hidden sm:block max-w-[160px] truncate">
+            <code className="text-[10px] text-[var(--text-muted)] font-mono hidden sm:block max-w-[140px] truncate">
               {threadId.slice(0, 8)}…
             </code>
           )}
+
+          {/* Dark/Light toggle */}
+          <button
+            type="button"
+            onClick={() => setIsDark(!isDark)}
+            className="theme-toggle"
+            title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+          >
+            {isDark ? '☀️' : '🌙'}
+          </button>
         </div>
       </header>
 
-      {/* ── Stage Progress ───────────────────────────── */}
+      {/* ── Tab bar ──────────────────────────────────── */}
       {status !== 'idle' && (
-        <div className="px-6 py-2.5 border-b border-white/5 bg-[#0C0C0C] flex items-center gap-1 shrink-0 overflow-x-auto">
-          {STAGES.map((stage, i) => {
-            const stageIdx = STAGES.indexOf(currentStage as typeof stage);
-            const isActive = stage === currentStage;
-            const isPast = i < stageIdx;
+        <div className="tab-bar px-4 py-2 flex items-center gap-1 shrink-0 overflow-x-auto z-10">
+          {STAGES.map((stage) => {
+            const isActive = activeTab === stage;
+            const isCurrent = currentStage === stage && status === 'running';
+            const isVisited = visitedStages.has(stage);
+            const count = eventCounts[stage];
+
             return (
-              <div key={stage} className="flex items-center gap-1">
-                {i > 0 && <div className={`w-6 h-px ${isPast ? 'bg-emerald-500/40' : 'bg-white/8'}`} />}
-                <div className={`
-                  px-2.5 py-1 rounded-md text-[10px] font-semibold uppercase tracking-wider transition-colors
-                  ${isActive
-                    ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-                    : isPast
-                      ? 'bg-white/[0.04] text-neutral-400'
-                      : 'text-neutral-600'}
-                `}>
-                  {STAGE_LABELS[stage]}
-                </div>
-              </div>
+              <button
+                key={stage}
+                type="button"
+                onClick={() => isVisited && setActiveTab(stage)}
+                className={`
+                  tab-item flex items-center gap-2
+                  ${isActive ? 'active' : ''}
+                  ${!isVisited ? 'disabled' : ''}
+                `}
+              >
+                <span>{STAGE_ICONS[stage]}</span>
+                <span>{STAGE_LABELS[stage]}</span>
+                {isCurrent && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--success)] anim-pulse" />
+                )}
+                {count > 0 && !isActive && (
+                  <span className="text-[9px] font-mono bg-[var(--bg-elevated)] text-[var(--text-muted)] px-1.5 py-0.5 rounded-full">
+                    {count}
+                  </span>
+                )}
+              </button>
             );
           })}
         </div>
@@ -431,27 +501,29 @@ export default function Home() {
       {/* ── Main content ─────────────────────────────── */}
       <div className="flex-1 flex min-h-0 overflow-hidden">
 
-        {/* Left: Event feed */}
-        <div ref={feedRef} className="flex-1 overflow-y-auto pb-40">
-          <div className="max-w-4xl mx-auto px-6 pt-8">
+        {/* Left: Event feed for active tab */}
+        <div ref={feedRef} className="flex-1 overflow-y-auto pb-36">
+          <div className="max-w-4xl mx-auto px-6 pt-6">
 
             {/* Empty state */}
-            {status === 'idle' && events.length === 0 && (
-              <div className="anim-in py-12">
+            {status === 'idle' && taggedEvents.length === 0 && (
+              <div className="anim-in py-16">
                 <h2 className="text-2xl font-light text-gradient tracking-tight mb-2">
                   What shall we orchestrate?
                 </h2>
-                <p className="text-sm text-neutral-500 mb-8">Start a growth intelligence loop to research, generate, and deploy.</p>
+                <p className="text-sm text-[var(--text-muted)] mb-8">
+                  Start a growth intelligence loop to research, generate, and deploy.
+                </p>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   {SUGGESTED.map((prompt) => (
                     <button
                       key={prompt}
                       type="button"
                       onClick={() => { setMessage(prompt); startLoop(prompt); }}
-                      className="panel panel-hover p-4 rounded-xl text-left flex flex-col gap-2 group transition-all duration-200"
+                      className="panel panel-hover p-4 rounded-xl text-left flex flex-col gap-2 group transition-all duration-200 cursor-pointer"
                     >
-                      <span className="text-neutral-600 group-hover:text-emerald-400 transition-colors text-sm">→</span>
-                      <span className="text-[13px] text-neutral-400 group-hover:text-white leading-snug transition-colors">
+                      <span className="text-[var(--text-muted)] group-hover:text-[var(--accent)] transition-colors text-sm">→</span>
+                      <span className="text-[13px] text-[var(--text-secondary)] group-hover:text-[var(--text-primary)] leading-snug transition-colors">
                         {prompt}
                       </span>
                     </button>
@@ -460,33 +532,69 @@ export default function Home() {
               </div>
             )}
 
-            {/* Events */}
+            {/* Tab content heading */}
+            {status !== 'idle' && (
+              <div className="mb-4 flex items-center gap-3">
+                <span className="text-lg">{STAGE_ICONS[activeTab]}</span>
+                <div>
+                  <h2 className="text-base font-semibold text-[var(--text-primary)]">
+                    {STAGE_LABELS[activeTab]}
+                  </h2>
+                  <p className="text-[11px] text-[var(--text-muted)]">
+                    {filteredEvents.length} event{filteredEvents.length !== 1 ? 's' : ''} in this stage
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Filtered events */}
             <div className="space-y-4">
-              {events.map((event, i) => renderEvent(event, i))}
+              {filteredEvents.map((event, i) => renderEvent(event, i))}
             </div>
 
+            {/* Inline Campaign Timeline on feedback tab */}
+            {activeTab === 'feedback' && timeline.length > 0 && (
+              <div className="mt-6">
+                <CampaignTimeline entries={timeline} />
+              </div>
+            )}
+
+            {/* Empty tab state */}
+            {status !== 'idle' && filteredEvents.length === 0 && (
+              <div className="text-center py-12">
+                <p className="text-sm text-[var(--text-muted)]">
+                  {visitedStages.has(activeTab)
+                    ? 'No events recorded in this stage yet.'
+                    : 'This stage hasn\'t started yet. It will unlock as the loop progresses.'}
+                </p>
+              </div>
+            )}
+
             {/* Running indicator */}
-            {status === 'running' && (
-              <div className="flex items-center gap-2.5 py-3 mt-2">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 anim-pulse" />
-                <span className="text-xs text-neutral-500">Agents processing…</span>
+            {status === 'running' && activeTab === currentStage && (
+              <div className="flex items-center gap-2.5 py-4 mt-2">
+                <span className="w-2 h-2 rounded-full bg-[var(--success)] anim-pulse" />
+                <span className="text-[13px] text-[var(--text-muted)]">Agents processing…</span>
               </div>
             )}
           </div>
         </div>
 
-        {/* Right: Timeline sidebar */}
-        <div className="hidden lg:block w-72 border-l border-white/5 overflow-y-auto p-4 bg-[#0C0C0C]">
+        {/* Right sidebar: Campaign Timeline (desktop) */}
+        <div className="hidden lg:block w-72 border-l border-[var(--border-subtle)] overflow-y-auto p-4 bg-[var(--bg-surface)]">
           <CampaignTimeline entries={timeline} />
         </div>
       </div>
 
       {/* ── Floating input ───────────────────────────── */}
-      <div className="absolute bottom-0 left-0 right-0 z-20 px-6 pb-5 pt-4" style={{ background: 'linear-gradient(to top, #0A0A0A 70%, transparent)' }}>
+      <div
+        className="absolute bottom-0 left-0 right-0 z-20 px-6 pb-5 pt-4"
+        style={{ background: 'linear-gradient(to top, var(--bg-base) 70%, transparent)' }}
+      >
         <div className="max-w-4xl mx-auto lg:mr-[288px]">
-          <div className="panel rounded-2xl p-2 flex items-end gap-2 focus-within:border-white/15 transition-all">
+          <div className="panel p-2 flex items-end gap-2 focus-within:border-[var(--border-medium)] transition-all">
             <input
-              className="flex-1 bg-transparent border-none text-sm text-white placeholder-neutral-500 outline-none px-4 py-3"
+              className="flex-1 bg-transparent border-none text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none px-4 py-3"
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') startLoop(); }}
@@ -497,7 +605,7 @@ export default function Home() {
                 type="button"
                 onClick={() => startLoop()}
                 disabled={status === 'running' || !message.trim()}
-                className="h-10 px-5 rounded-xl bg-white text-black text-xs font-bold hover:bg-neutral-200 disabled:opacity-20 transition-all shrink-0"
+                className="h-10 px-5 rounded-xl bg-[var(--accent)] text-[var(--bg-base)] text-xs font-bold hover:brightness-110 disabled:opacity-20 transition-all shrink-0 cursor-pointer"
               >
                 {status === 'running' ? 'Running…' : 'Start Loop'}
               </button>
@@ -505,7 +613,7 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={stopLoop}
-                  className="h-10 px-3 rounded-xl border border-white/10 text-xs text-neutral-400 hover:text-white hover:border-white/20 transition-all"
+                  className="h-10 px-3 rounded-xl border border-[var(--border-subtle)] text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--border-medium)] transition-all cursor-pointer"
                 >
                   Stop
                 </button>
@@ -513,15 +621,14 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Bottom bar: raw log toggle */}
           <div className="flex items-center justify-between mt-2 px-2">
-            <p className="text-[10px] font-mono text-neutral-600">
-              Multi-Agent Growth Loop · {events.length} events
+            <p className="text-[10px] font-mono text-[var(--text-muted)]">
+              Multi-Agent Growth Loop · {taggedEvents.length} events
             </p>
             <button
               type="button"
               onClick={() => setShowRawLog(!showRawLog)}
-              className="text-[10px] font-mono text-neutral-600 hover:text-neutral-300 transition-colors"
+              className="text-[10px] font-mono text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors cursor-pointer"
             >
               {showRawLog ? 'Hide' : 'Show'} Raw Log
             </button>
@@ -531,17 +638,17 @@ export default function Home() {
 
       {/* ── Raw event log drawer ─────────────────────── */}
       {showRawLog && (
-        <div className="absolute bottom-28 left-6 right-6 z-30 max-h-60 overflow-y-auto rounded-xl panel p-4 lg:mr-[288px] max-w-4xl mx-auto">
-          <h3 className="text-xs font-semibold text-neutral-400 uppercase tracking-widest mb-3">
+        <div className="absolute bottom-28 left-6 right-6 z-30 max-h-60 overflow-y-auto panel p-4 lg:mr-[288px] max-w-4xl mx-auto">
+          <h3 className="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-3">
             Raw SSE Events
           </h3>
-          <div className="font-mono text-[11px] text-neutral-400 space-y-1">
+          <div className="font-mono text-[11px] text-[var(--text-secondary)] space-y-1">
             {rawEvents.map((event, index) => (
-              <pre key={`${event.slice(0, 20)}-${index}`} className="whitespace-pre-wrap break-all border-b border-white/5 pb-1.5">
+              <pre key={`${event.slice(0, 20)}-${index}`} className="whitespace-pre-wrap break-all border-b border-[var(--border-subtle)] pb-1.5">
                 {event}
               </pre>
             ))}
-            {rawEvents.length === 0 && <p className="text-neutral-600">No events yet.</p>}
+            {rawEvents.length === 0 && <p className="text-[var(--text-muted)]">No events yet.</p>}
           </div>
         </div>
       )}

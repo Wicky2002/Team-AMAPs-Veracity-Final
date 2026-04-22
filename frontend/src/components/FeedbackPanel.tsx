@@ -1,3 +1,6 @@
+'use client';
+
+import { useState } from 'react';
 import type { FeedbackMetric } from '@/lib/loop-types';
 
 type Props = {
@@ -6,18 +9,26 @@ type Props = {
 };
 
 export function FeedbackPanel({ metrics, onFeedback }: Props) {
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+
   const winner = metrics.length > 0
     ? metrics.reduce((a, b) => (a.reply_rate > b.reply_rate ? a : b))
     : null;
 
+  const handleConfirm = () => {
+    setSubmitted(true);
+    onFeedback();
+  };
+
   return (
-    <section className="panel rounded-xl overflow-hidden anim-in">
-      <div className="px-5 py-3 border-b border-white/5 bg-white/[0.02] flex items-center justify-between">
-        <h2 className="text-xs font-semibold text-neutral-300 uppercase tracking-widest">
+    <section className="panel overflow-hidden anim-in">
+      <div className="px-5 py-3 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)] flex items-center justify-between">
+        <h2 className="text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-widest">
           Campaign Performance
         </h2>
         {winner && (
-          <span className="text-[10px] font-mono text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded">
+          <span className="text-[10px] font-mono text-[var(--success)] bg-[var(--success-soft)] px-2 py-0.5 rounded">
             Winner: Variant {String.fromCharCode(65 + winner.variant)}
           </span>
         )}
@@ -31,31 +42,30 @@ export function FeedbackPanel({ metrics, onFeedback }: Props) {
           return (
             <article
               key={m.variant}
-              className={`rounded-lg border p-4 transition-colors ${
+              className={`rounded-lg border p-4 ${
                 isWinner
-                  ? 'border-emerald-500/30 bg-emerald-500/[0.04]'
-                  : 'border-white/5 bg-white/[0.02]'
+                  ? 'border-[var(--success)] bg-[var(--success-soft)]'
+                  : 'border-[var(--border-subtle)] bg-[var(--bg-base)]'
               }`}
             >
               <div className="flex items-center justify-between mb-3">
-                <span className={`text-xs font-bold ${isWinner ? 'text-emerald-400' : 'text-neutral-400'}`}>
+                <span className={`text-xs font-bold ${isWinner ? 'text-[var(--success)]' : 'text-[var(--text-secondary)]'}`}>
                   Variant {label} {isWinner && '★'}
                 </span>
               </div>
 
-              {/* Metric bars */}
               <div className="space-y-2.5">
                 {[
-                  { label: 'Open Rate', value: m.open_rate, color: 'bg-blue-500' },
-                  { label: 'Reply Rate', value: m.reply_rate, color: 'bg-emerald-500' },
-                  { label: 'Click Rate', value: m.click_rate, color: 'bg-amber-500' },
+                  { label: 'Open Rate', value: m.open_rate, color: 'bg-[var(--accent)]' },
+                  { label: 'Reply Rate', value: m.reply_rate, color: 'bg-[var(--success)]' },
+                  { label: 'Click Rate', value: m.click_rate, color: 'bg-[var(--warning)]' },
                 ].map((bar) => (
                   <div key={bar.label}>
                     <div className="flex justify-between text-[11px] mb-1">
-                      <span className="text-neutral-500">{bar.label}</span>
-                      <span className="font-mono text-neutral-300">{(bar.value * 100).toFixed(1)}%</span>
+                      <span className="text-[var(--text-muted)]">{bar.label}</span>
+                      <span className="font-mono text-[var(--text-secondary)]">{(bar.value * 100).toFixed(1)}%</span>
                     </div>
-                    <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
+                    <div className="h-1.5 rounded-full bg-[var(--bg-elevated)] overflow-hidden">
                       <div
                         className={`h-full rounded-full ${bar.color} transition-all duration-700`}
                         style={{ width: `${Math.min(100, bar.value * 400)}%` }}
@@ -69,14 +79,43 @@ export function FeedbackPanel({ metrics, onFeedback }: Props) {
         })}
       </div>
 
+      {/* Manual feedback trigger — not automatic */}
       <div className="px-4 pb-4">
-        <button
-          type="button"
-          onClick={onFeedback}
-          className="w-full rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold py-3 transition-colors"
-        >
-          Feed Results Back → Next Cycle
-        </button>
+        {submitted ? (
+          <div className="w-full rounded-lg bg-[var(--success-soft)] border border-[var(--success)] text-center text-[var(--success)] text-sm font-semibold py-3">
+            ✓ Feedback submitted — next cycle starting
+          </div>
+        ) : !showConfirm ? (
+          <button
+            type="button"
+            onClick={() => setShowConfirm(true)}
+            className="w-full rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-[var(--text-secondary)] text-sm font-semibold py-3 hover:bg-[var(--accent)] hover:text-[var(--bg-base)] hover:border-[var(--accent)] transition-all cursor-pointer"
+          >
+            Feed Results Back → Next Cycle
+          </button>
+        ) : (
+          <div className="space-y-2 anim-in">
+            <p className="text-xs text-[var(--text-secondary)] text-center">
+              This will start a new research cycle using these results. Continue?
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setShowConfirm(false)}
+                className="flex-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-base)] text-[var(--text-secondary)] text-sm font-semibold py-2.5 hover:bg-[var(--bg-surface-hover)] transition-all cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirm}
+                className="flex-1 rounded-lg bg-[var(--success)] text-[var(--bg-base)] text-sm font-semibold py-2.5 hover:brightness-110 transition-all cursor-pointer"
+              >
+                Confirm & Start
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </section>
   );

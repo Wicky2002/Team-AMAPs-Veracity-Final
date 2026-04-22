@@ -16,56 +16,82 @@ const CHANNELS: { id: Channel; label: string; desc: string; icon: string }[] = [
 ];
 
 export function ChannelIntentPicker({ selected: initialSelected, onSelect }: Props) {
-  const [picked, setPicked] = useState<string | null>(initialSelected ?? null);
+  const [picked, setPicked] = useState<Set<string>>(
+    initialSelected ? new Set([initialSelected]) : new Set()
+  );
 
-  const handlePick = (channel: Channel) => {
-    if (picked) return;
-    setPicked(channel);
-    onSelect(channel);
+  const handleToggle = (channelId: Channel) => {
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(channelId)) {
+        next.delete(channelId);
+      } else {
+        next.add(channelId);
+      }
+
+      // Send the resolved channel to backend
+      if (next.size === 0) {
+        // nothing selected — don't fire
+      } else if (next.has('Both') || (next.has('LinkedIn') && next.has('Email'))) {
+        onSelect('Both');
+      } else if (next.has('LinkedIn')) {
+        onSelect('LinkedIn');
+      } else if (next.has('Email')) {
+        onSelect('Email');
+      }
+
+      return next;
+    });
   };
 
   return (
-    <section className="panel rounded-xl overflow-hidden anim-in">
-      <div className="px-5 py-3 border-b border-white/5 bg-white/[0.02]">
-        <h2 className="text-xs font-semibold text-neutral-300 uppercase tracking-widest">
-          Select Deployment Channel
+    <section className="panel overflow-hidden anim-in">
+      <div className="px-5 py-3 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)] flex items-center justify-between">
+        <h2 className="text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-widest">
+          Select Deployment Channels
         </h2>
+        {picked.size > 0 && (
+          <span className="text-[10px] font-mono text-[var(--success)]">
+            {picked.size} selected
+          </span>
+        )}
       </div>
 
       <div className="p-4 flex flex-col gap-2">
         {CHANNELS.map((ch) => {
-          const isActive = picked === ch.id;
-          const isDimmed = picked !== null && !isActive;
-
+          const isActive = picked.has(ch.id);
           return (
             <button
               key={ch.id}
               type="button"
-              onClick={() => handlePick(ch.id)}
-              disabled={!!picked}
+              onClick={() => handleToggle(ch.id)}
               className={`
-                flex items-center gap-4 p-4 rounded-lg border text-left transition-all duration-200 group
+                flex items-center gap-4 p-4 rounded-lg border text-left transition-all duration-200 group cursor-pointer
                 ${isActive
-                  ? 'border-emerald-500/40 bg-emerald-500/[0.06]'
-                  : isDimmed
-                    ? 'border-white/5 opacity-35 cursor-default'
-                    : 'border-white/5 bg-[#131313] hover:bg-[#1A1A1A] hover:border-white/15'}
+                  ? 'border-[var(--success)] bg-[var(--success-soft)]'
+                  : 'border-[var(--border-subtle)] bg-[var(--bg-base)] hover:bg-[var(--bg-surface-hover)] hover:border-[var(--border-medium)]'}
               `}
             >
+              {/* Checkbox */}
+              <div className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 transition-all ${
+                isActive
+                  ? 'border-[var(--success)] bg-[var(--success)]'
+                  : 'border-[var(--border-medium)] bg-transparent group-hover:border-[var(--text-muted)]'
+              }`}>
+                {isActive && <span className="text-[var(--bg-base)] text-xs font-bold">✓</span>}
+              </div>
+
               <div className={`text-xl w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${
-                isActive ? 'bg-emerald-500/20' : 'bg-white/[0.04] group-hover:bg-white/[0.08]'
+                isActive ? 'bg-[var(--success-soft)]' : 'bg-[var(--bg-elevated)] group-hover:bg-[var(--bg-surface-hover)]'
               }`}>
                 {ch.icon}
               </div>
               <div className="flex-1 min-w-0">
-                <p className={`text-sm font-semibold ${isActive ? 'text-emerald-300' : 'text-neutral-200'}`}>
+                <p className={`text-sm font-semibold ${isActive ? 'text-[var(--success)]' : 'text-[var(--text-primary)]'}`}>
                   {ch.label}
                 </p>
-                <p className="text-xs text-neutral-500 mt-0.5">{ch.desc}</p>
+                <p className="text-xs text-[var(--text-muted)] mt-0.5">{ch.desc}</p>
               </div>
-              {isActive && (
-                <span className="text-[10px] font-mono font-bold text-emerald-400 shrink-0">SELECTED</span>
-              )}
             </button>
           );
         })}
