@@ -8,3 +8,6 @@ Open a terminal and run:
 cd frontend
 npm install
 npm run dev
+
+cd backend
+py -3.11 -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload

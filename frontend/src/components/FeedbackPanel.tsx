@@ -2,10 +2,10 @@ import type { FeedbackMetric } from '@/lib/loop-types';
 
 type Props = {
   metrics: FeedbackMetric[];
-  onFeedBack: () => void;
+  onFeedback: () => void;
 };
 
-export function FeedbackPanel({ metrics, onFeedBack }: Props) {
+export function FeedbackPanel({ metrics, onFeedback }: Props) {
   return (
     <section className="rounded-xl border border-zinc-200 p-4 shadow-sm">
       <h2 className="text-lg font-semibold">Feedback Ingestion Panel</h2>
@@ -21,7 +21,7 @@ export function FeedbackPanel({ metrics, onFeedBack }: Props) {
       </div>
       <button
         type="button"
-        onClick={onFeedBack}
+        onClick={onFeedback}
         className="mt-3 rounded-md bg-emerald-600 px-3 py-1.5 text-sm text-white hover:bg-emerald-700"
       >
         Feed Results Back →

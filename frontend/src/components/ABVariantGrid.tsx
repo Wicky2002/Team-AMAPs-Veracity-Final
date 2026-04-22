@@ -2,7 +2,7 @@ import type { OutreachVariant } from '@/lib/loop-types';
 
 type Props = {
   variants: OutreachVariant[];
-  onDeploy: (variantIndex: number) => void;
+  onDeploy: (variant: OutreachVariant) => void;
 };
 
 export function ABVariantGrid({ variants, onDeploy }: Props) {
@@ -21,7 +21,7 @@ export function ABVariantGrid({ variants, onDeploy }: Props) {
             <p className="mt-2 text-xs text-zinc-500">Hypothesis: {variant.hypothesis}</p>
             <button
               className="mt-3 rounded-md bg-black px-3 py-1.5 text-sm text-white hover:bg-zinc-800"
-              onClick={() => onDeploy(index)}
+              onClick={() => onDeploy(variant)}
               type="button"
             >
               Deploy This Variant

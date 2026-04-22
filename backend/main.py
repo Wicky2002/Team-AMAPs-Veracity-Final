@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-import json
+from pathlib import Path
 from typing import Any, Literal
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from graph_builder import compiled_graph
+from events import SSEEvent, WarningEvent, normalize_event
+from graph_builder import get_compiled_graph, reset_compiled_graph
 from state import empty_agent_state
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 app = FastAPI(title="Vector Agents - Growth Loop API")
 
@@ -35,8 +39,8 @@ class LoopActionRequest(BaseModel):
     message: str = ""
 
 
-def _sse_line(payload: dict[str, Any], event_name: str | None = None) -> str:
-    body = json.dumps(payload, default=str)
+def _sse_line(payload: SSEEvent, event_name: str | None = None) -> str:
+    body = payload.model_dump_json()
     if event_name:
         return f"event: {event_name}\ndata: {body}\n\n"
     return f"data: {body}\n\n"
@@ -45,7 +49,7 @@ def _sse_line(payload: dict[str, Any], event_name: str | None = None) -> str:
 def _unwrap_graph_event(event: Any) -> tuple[str, Any]:
     if isinstance(event, tuple) and len(event) == 2:
         return str(event[0]), event[1]
-    return "updates", event
+    return "custom", event
 
 
 @app.get("/")
@@ -57,47 +61,40 @@ def read_root() -> dict[str, str]:
 async def start_loop(body: LoopStartRequest):
     async def stream():
         config = {"configurable": {"thread_id": body.thread_id}}
-        initial_state = empty_agent_state(message=body.message)
-
-        yield _sse_line(
-            {
-                "mode": "custom",
-                "payload": {
-                    "type": "loop_started",
-                    "thread_id": body.thread_id,
-                    "message": body.message,
-                },
-            }
-        )
+        initial_state = empty_agent_state(message=body.message, thread_id=body.thread_id)
 
         try:
-            async for event in compiled_graph.astream(
-                initial_state,
-                config=config,
-                stream_mode=["custom", "updates"],
-            ):
-                mode, payload = _unwrap_graph_event(event)
-                yield _sse_line({"mode": mode, "payload": payload})
+            for attempt in range(2):
+                compiled_graph = await get_compiled_graph()
+                try:
+                    async for event in compiled_graph.astream(
+                        initial_state,
+                        config=config,
+                        stream_mode=["custom"],
+                    ):
+                        mode, payload = _unwrap_graph_event(event)
+                        if mode != "custom":
+                            continue
+                        try:
+                            typed_event = normalize_event(payload)
+                        except Exception:
+                            continue
+                        yield _sse_line(typed_event)
+                    break
+                except Exception as exc:
+                    message = str(exc).lower()
+                    if "connection is closed" in message and attempt == 0:
+                        await reset_compiled_graph()
+                        continue
+                    raise
         except Exception as exc:
             yield _sse_line(
-                {
-                    "mode": "custom",
-                    "payload": {
-                        "type": "error",
-                        "message": str(exc),
-                    },
-                },
+                WarningEvent(
+                    type="warning",
+                    message=f"Loop failed: {str(exc)}",
+                    fallback_used=False,
+                ),
                 event_name="error",
-            )
-        finally:
-            yield _sse_line(
-                {
-                    "mode": "custom",
-                    "payload": {
-                        "type": "loop_completed",
-                        "thread_id": body.thread_id,
-                    },
-                }
             )
 
     return StreamingResponse(
@@ -114,26 +111,49 @@ async def start_loop(body: LoopStartRequest):
 @app.post("/loop/action")
 async def inject_action(body: LoopActionRequest):
     config = {"configurable": {"thread_id": body.thread_id}}
-    update_state: dict[str, Any] = {}
+    update_state: dict[str, Any] = {"thread_id": body.thread_id}
 
     if body.message:
         update_state["message"] = body.message
 
     if body.action_type == "feedback":
         update_state["feedback_events"] = [body.payload or {"note": "manual feedback event"}]
+        update_state["loop_stage"] = "feedback"
+        update_state["route_hint"] = "feedback"
     elif body.action_type == "channel_select":
         update_state["outreach_channel"] = body.payload.get("channel", "LinkedIn")
+        update_state["loop_stage"] = "outreach"
+        update_state["route_hint"] = "outreach"
     elif body.action_type == "deploy_variant":
-        update_state["selected_variant"] = body.payload.get("variant", 0)
+        if isinstance(body.payload.get("variant"), dict):
+            update_state["selected_variant"] = body.payload.get("variant")
+        update_state["loop_stage"] = "outreach"
+        update_state["route_hint"] = "outreach"
 
     events: list[dict[str, Any]] = []
-    async for event in compiled_graph.astream(
-        update_state,
-        config=config,
-        stream_mode=["custom", "updates"],
-    ):
-        mode, payload = _unwrap_graph_event(event)
-        events.append({"mode": mode, "payload": payload})
+    for attempt in range(2):
+        compiled_graph = await get_compiled_graph()
+        try:
+            async for event in compiled_graph.astream(
+                update_state,
+                config=config,
+                stream_mode=["custom"],
+            ):
+                mode, payload = _unwrap_graph_event(event)
+                if mode != "custom":
+                    continue
+                try:
+                    typed_event = normalize_event(payload)
+                    events.append(typed_event.model_dump())
+                except Exception:
+                    continue
+            break
+        except Exception as exc:
+            message = str(exc).lower()
+            if "connection is closed" in message and attempt == 0:
+                await reset_compiled_graph()
+                continue
+            raise
 
     return {
         "status": "ok",

@@ -6,10 +6,10 @@ import re
 from functools import lru_cache
 
 PROTOTYPES: dict[str, str] = {
-    "research": "competitor positioning gap market signals trend analysis",
-    "generate": "write outreach content create variants campaign copy",
-    "ab": "different angle version test variant compare",
-    "feedback": "reply rate performed resonated results engagement",
+    "research": "competitor positioning gap market signals trends",
+    "generate": "write outreach content create email sequence",
+    "ab": "different angle version rewrite variation test",
+    "feedback": "reply rate performed resonated got results clicked",
 }
 
 
