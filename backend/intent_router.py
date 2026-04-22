@@ -11,6 +11,7 @@ PROTOTYPES: dict[str, str] = {
     "ab": "different angle version rewrite variation test",
     "feedback": "reply rate performed resonated got results clicked",
 }
+MEMORY_EMBEDDING_DIMS = 384
 
 
 @lru_cache(maxsize=1)
@@ -53,6 +54,25 @@ def _embed(text: str) -> list[float]:
         except Exception:
             pass
     return _hash_embedding(text)
+
+
+def embed_text_for_memory(text: str) -> list[float]:
+    """Stable-dimension embedding for pgvector retrieval memory."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        cleaned = "empty-query"
+
+    model = _load_sentence_transformer()
+    if model is not None:
+        try:
+            arr = model.encode(cleaned)
+            values = [float(x) for x in arr]
+            if len(values) == MEMORY_EMBEDDING_DIMS:
+                return _normalize(values)
+        except Exception:
+            pass
+
+    return _hash_embedding(cleaned, dims=MEMORY_EMBEDDING_DIMS)
 
 
 def detect_intent(message: str, current_stage: str) -> str:

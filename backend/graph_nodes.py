@@ -29,7 +29,14 @@ from events import LoopCompleteEvent, NodeStartedEvent, SignalFoundEvent, UIRend
 from geo_context import detect_geo_context, get_geo_terms
 from intent_router import detect_intent
 from mcp_tools import TARGETS, get_last_pestel_error, scan_audience_intent, scan_pestel_trends, scrape_competitor
-from persistence import load_ab_results, load_signal_cache, save_ab_results, save_signal_cache
+from persistence import (
+    load_ab_results,
+    load_signal_cache,
+    save_ab_results,
+    save_response_memory,
+    save_signal_cache,
+    search_response_memories,
+)
 from state import CycleResult, OutreachVariant, SignalReference, coerce_state, guarded_stage_transition
 
 
@@ -307,6 +314,34 @@ def _build_learning_brief(
         f"({len(wins)}/{len(recent)} recent cycles, avg reply rate {avg_reply_rate * 100:.1f}%). "
         f"Latest winner: '{latest.winning_variant}' with {_angle_prompt_name(latest.angle)}."
     )
+
+
+def _build_retrieval_memory_brief(memories: list[dict[str, Any]]) -> str:
+    if not memories:
+        return "No similar cross-thread memory available."
+
+    high_similarity = [m for m in memories if float(m.get("similarity") or 0.0) >= 0.2]
+    if not high_similarity:
+        return "No high-similarity cross-thread memory available."
+
+    lines: list[str] = []
+    for idx, memory in enumerate(high_similarity[:3], start=1):
+        similarity = float(memory.get("similarity") or 0.0)
+        angle = str(memory.get("winning_angle") or "unknown")
+        winner = str(memory.get("winning_variant") or "unknown")
+        reply_rate = float(memory.get("reply_rate") or 0.0) * 100.0
+        top_signal = str(memory.get("top_signal") or "unknown")
+        summary = str(memory.get("summary") or "").strip()
+        lines.append(
+            f"{idx}. similarity={similarity:.2f}; angle={angle}; "
+            f"winner={winner}; reply={reply_rate:.1f}%; "
+            f"top_signal={top_signal}; summary={summary[:240]}"
+        )
+    return "Similar prior outcomes:\n" + "\n".join(lines)
+
+
+def _merge_learning_briefs(campaign_brief: str, retrieval_brief: str) -> str:
+    return f"{campaign_brief}\n\nCross-thread memory:\n{retrieval_brief}"
 
 
 def _copy_signal(signal: SignalReference) -> SignalReference:
@@ -1185,7 +1220,10 @@ async def content_gen_node(state: dict[str, Any]) -> dict[str, Any]:
 
     top_signals = _select_top_signals(state_model.signals, limit=5, query_context=state_model.message)
     preferred_angle = _infer_winning_angle(state_model.campaign_history)
-    learning_brief = _build_learning_brief(state_model.campaign_history, preferred_angle)
+    campaign_learning_brief = _build_learning_brief(state_model.campaign_history, preferred_angle)
+    retrieved_memories = await search_response_memories(query=state_model.message, limit=4)
+    retrieval_learning_brief = _build_retrieval_memory_brief(retrieved_memories)
+    learning_brief = _merge_learning_briefs(campaign_learning_brief, retrieval_learning_brief)
     provider = _get_llm_provider()
     variants = await _generate_variants_with_llm(
         message=state_model.message,
@@ -1458,19 +1496,33 @@ async def feedback_ingestor_node(state: dict[str, Any]) -> dict[str, Any]:
         feedback = feedback_events[-1]
         top_signal = max(state_model.signals, key=lambda s: s.confidence).content if state_model.signals else "No top signal"
         winner_metric = max(effective_metrics, key=lambda m: float(m.get("reply_rate", 0)), default={})
+        open_rate = float(feedback.open_rate or winner_metric.get("open_rate", 0.0))
+        reply_rate = float(feedback.reply_rate or winner_metric.get("reply_rate", 0.0))
+        click_rate = float(feedback.click_rate or winner_metric.get("click_rate", 0.0))
+        winning_variant = feedback.winning_variant or (winner_variant.subject_line if winner_variant else "Variant A")
+        winning_angle = feedback.angle or _to_angle((winner_variant.hypothesis if winner_variant else "competitor_gap"))
 
         cycle_result = CycleResult(
             cycle_n=state_model.cycle_n + 1,
             top_signal=top_signal,
-            winning_variant=(
-                feedback.winning_variant
-                or (winner_variant.subject_line if winner_variant else "Variant A")
-            ),
-            open_rate=float(feedback.open_rate or winner_metric.get("open_rate", 0.0)),
-            reply_rate=float(feedback.reply_rate or winner_metric.get("reply_rate", 0.0)),
-            angle=feedback.angle or _to_angle((winner_variant.hypothesis if winner_variant else "competitor_gap")),
+            winning_variant=winning_variant,
+            open_rate=open_rate,
+            reply_rate=reply_rate,
+            angle=winning_angle,
         )
         campaign_history.append(cycle_result)
+        await save_response_memory(
+            thread_id=thread_id or "local-thread",
+            cycle_n=cycle_result.cycle_n,
+            prompt=state_model.message,
+            top_signal=top_signal,
+            winning_variant=winning_variant,
+            winning_angle=winning_angle,
+            open_rate=open_rate,
+            reply_rate=reply_rate,
+            click_rate=click_rate,
+            feedback_note=feedback.note,
+        )
 
         completed_cycle_n = state_model.cycle_n
         next_cycle_n = state_model.cycle_n + 1

@@ -144,10 +144,14 @@ class TestFeedbackIngestor:
     async def test_loop_stage_stays_feedback_when_no_feedback_events(self, feedback_state_template: dict[str, Any]):
         feedback_state_template["feedback_events"] = []
 
-        with patch("graph_nodes.load_ab_results", AsyncMock(return_value=None)):
+        save_mock = AsyncMock()
+        with patch("graph_nodes.load_ab_results", AsyncMock(return_value=None)), patch(
+            "graph_nodes.save_response_memory", save_mock
+        ):
             updated = await feedback_ingestor_node(feedback_state_template)
 
         assert updated.get("loop_stage") == "feedback"
+        assert save_mock.await_count == 0
 
     @pytest.mark.asyncio
     async def test_cycle_n_increments_when_feedback_present(self, feedback_state_template: dict[str, Any]):
@@ -155,6 +159,20 @@ class TestFeedbackIngestor:
             updated = await feedback_ingestor_node(feedback_state_template)
 
         assert int(updated.get("cycle_n", 0)) == 1
+
+    @pytest.mark.asyncio
+    async def test_saves_feedback_outcome_into_response_memory(self, feedback_state_template: dict[str, Any]):
+        save_mock = AsyncMock()
+        with patch("graph_nodes.load_ab_results", AsyncMock(return_value=None)), patch(
+            "graph_nodes.save_response_memory", save_mock
+        ):
+            await feedback_ingestor_node(feedback_state_template)
+
+        assert save_mock.await_count == 1
+        kwargs = save_mock.await_args.kwargs
+        assert kwargs.get("thread_id") == "thread-feedback"
+        assert kwargs.get("winning_angle") == "roi"
+        assert kwargs.get("prompt") == "Feedback ingestion"
 
     @pytest.mark.asyncio
     async def test_feedback_events_are_cleared_after_ingestion(self, feedback_state_template: dict[str, Any]):

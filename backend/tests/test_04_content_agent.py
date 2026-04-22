@@ -226,6 +226,38 @@ class TestContentGenNode:
         assert kwargs.get("preferred_angle") == "roi"
         assert "winner trend" in str(kwargs.get("learning_brief", "")).lower()
 
+    @pytest.mark.asyncio
+    async def test_includes_cross_thread_memory_in_learning_brief(
+        self,
+        state_with_signals: dict[str, Any],
+        generated_variants: list[OutreachVariant],
+    ):
+        generation_mock = AsyncMock(return_value=generated_variants)
+        memory_mock = AsyncMock(
+            return_value=[
+                {
+                    "thread_id": "thread-old",
+                    "cycle_n": 2,
+                    "winning_angle": "roi",
+                    "winning_variant": "Variant B",
+                    "reply_rate": 0.27,
+                    "top_signal": "ROI messaging outperformed baseline",
+                    "summary": "ROI framing won two consecutive cycles in similar prompts.",
+                    "similarity": 0.82,
+                }
+            ]
+        )
+        with patch.object(graph_nodes, "search_response_memories", memory_mock), patch.object(
+            graph_nodes, "_generate_variants_with_llm", generation_mock
+        ):
+            await content_gen_node(state_with_signals)
+
+        kwargs = generation_mock.await_args.kwargs
+        learning_brief = str(kwargs.get("learning_brief", "")).lower()
+        assert "cross-thread memory" in learning_brief
+        assert "similar prior outcomes" in learning_brief
+        assert "roi" in learning_brief
+
 
 class TestLearningBiasHelpers:
     def test_infer_winning_angle_prefers_recent_high_reply_rate(self):

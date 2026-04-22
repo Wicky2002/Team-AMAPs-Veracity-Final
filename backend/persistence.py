@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover - optional dependency guard
     Json = None
 
 from state import OutreachVariant, SignalReference
+from intent_router import embed_text_for_memory
 
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE EXTENSION IF NOT EXISTS pgcrypto",
@@ -43,8 +44,36 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
 )
 
+_VECTOR_MEMORY_SCHEMA_STATEMENTS: tuple[str, ...] = (
+    "CREATE EXTENSION IF NOT EXISTS vector",
+    """
+    CREATE TABLE IF NOT EXISTS response_memory (
+        id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        cycle_n INTEGER NOT NULL,
+        prompt TEXT NOT NULL,
+        top_signal TEXT NOT NULL,
+        winning_variant TEXT NOT NULL,
+        winning_angle TEXT NOT NULL,
+        open_rate FLOAT NOT NULL,
+        reply_rate FLOAT NOT NULL,
+        click_rate FLOAT NOT NULL,
+        feedback_note TEXT,
+        summary TEXT NOT NULL,
+        embedding VECTOR(384) NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_response_memory_created_at
+    ON response_memory (created_at DESC)
+    """,
+)
+
 _tables_ready = False
 _tables_lock = asyncio.Lock()
+_vector_memory_ready = False
+_vector_memory_lock = asyncio.Lock()
 
 
 def _conn_string() -> str | None:
@@ -91,6 +120,62 @@ async def ensure_phase3_tables() -> bool:
                 for stmt in _SCHEMA_STATEMENTS:
                     await cur.execute(stmt)
             _tables_ready = True
+            return True
+        except Exception:
+            return False
+        finally:
+            await conn.close()
+
+
+def _vector_literal(values: list[float]) -> str:
+    return "[" + ",".join(f"{float(value):.8f}" for value in values) + "]"
+
+
+def _memory_summary(
+    *,
+    winning_angle: str,
+    winning_variant: str,
+    top_signal: str,
+    reply_rate: float,
+    open_rate: float,
+    feedback_note: str | None,
+) -> str:
+    note = (feedback_note or "").strip()
+    base = (
+        f"Angle={winning_angle}; Winner={winning_variant}; "
+        f"Reply={reply_rate * 100:.1f}%; Open={open_rate * 100:.1f}%; "
+        f"TopSignal={top_signal}"
+    )
+    if not note:
+        return base
+    return f"{base}; Note={note[:220]}"
+
+
+async def ensure_vector_memory_table() -> bool:
+    global _vector_memory_ready
+
+    if _vector_memory_ready:
+        return True
+
+    if psycopg is None:
+        return False
+
+    if _conn_string() is None:
+        return False
+
+    async with _vector_memory_lock:
+        if _vector_memory_ready:
+            return True
+
+        conn = await _connect()
+        if conn is None:
+            return False
+
+        try:
+            async with conn.cursor() as cur:
+                for stmt in _VECTOR_MEMORY_SCHEMA_STATEMENTS:
+                    await cur.execute(stmt)
+            _vector_memory_ready = True
             return True
         except Exception:
             return False
@@ -282,3 +367,141 @@ async def load_ab_results(thread_id: str, cycle_n: int) -> list[dict[str, Any]] 
         return None
     finally:
         await conn.close()
+
+
+async def save_response_memory(
+    *,
+    thread_id: str,
+    cycle_n: int,
+    prompt: str,
+    top_signal: str,
+    winning_variant: str,
+    winning_angle: str,
+    open_rate: float,
+    reply_rate: float,
+    click_rate: float,
+    feedback_note: str | None = None,
+) -> None:
+    prompt_text = (prompt or "").strip()
+    if not prompt_text:
+        return
+
+    if not await ensure_vector_memory_table():
+        return
+
+    conn = await _connect()
+    if conn is None:
+        return
+
+    summary = _memory_summary(
+        winning_angle=winning_angle,
+        winning_variant=winning_variant,
+        top_signal=top_signal,
+        reply_rate=reply_rate,
+        open_rate=open_rate,
+        feedback_note=feedback_note,
+    )
+    embedding = embed_text_for_memory(prompt_text)
+    embedding_literal = _vector_literal(embedding)
+
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO response_memory (
+                    thread_id, cycle_n, prompt, top_signal,
+                    winning_variant, winning_angle,
+                    open_rate, reply_rate, click_rate,
+                    feedback_note, summary, embedding
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+                """,
+                (
+                    thread_id,
+                    cycle_n,
+                    prompt_text,
+                    top_signal,
+                    winning_variant,
+                    winning_angle,
+                    float(open_rate),
+                    float(reply_rate),
+                    float(click_rate),
+                    feedback_note,
+                    summary,
+                    embedding_literal,
+                ),
+            )
+    except Exception:
+        return
+    finally:
+        await conn.close()
+
+
+async def search_response_memories(*, query: str, limit: int = 3) -> list[dict[str, Any]]:
+    query_text = (query or "").strip()
+    if not query_text:
+        return []
+
+    if limit < 1:
+        return []
+
+    if not await ensure_vector_memory_table():
+        return []
+
+    conn = await _connect()
+    if conn is None:
+        return []
+
+    embedding_literal = _vector_literal(embed_text_for_memory(query_text))
+
+    try:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                """
+                SELECT
+                    thread_id,
+                    cycle_n,
+                    prompt,
+                    top_signal,
+                    winning_variant,
+                    winning_angle,
+                    open_rate,
+                    reply_rate,
+                    click_rate,
+                    feedback_note,
+                    summary,
+                    created_at,
+                    (1 - (embedding <=> %s::vector)) AS similarity
+                FROM response_memory
+                ORDER BY embedding <=> %s::vector, created_at DESC
+                LIMIT %s
+                """,
+                (embedding_literal, embedding_literal, int(limit)),
+            )
+            rows = await cur.fetchall()
+    except Exception:
+        return []
+    finally:
+        await conn.close()
+
+    memories: list[dict[str, Any]] = []
+    for row in rows:
+        memories.append(
+            {
+                "thread_id": str(row.get("thread_id", "")),
+                "cycle_n": int(row.get("cycle_n") or 0),
+                "prompt": str(row.get("prompt", "")),
+                "top_signal": str(row.get("top_signal", "")),
+                "winning_variant": str(row.get("winning_variant", "")),
+                "winning_angle": str(row.get("winning_angle", "")),
+                "open_rate": float(row.get("open_rate") or 0.0),
+                "reply_rate": float(row.get("reply_rate") or 0.0),
+                "click_rate": float(row.get("click_rate") or 0.0),
+                "feedback_note": str(row.get("feedback_note") or ""),
+                "summary": str(row.get("summary", "")),
+                "created_at": str(row.get("created_at") or ""),
+                "similarity": float(row.get("similarity") or 0.0),
+            }
+        )
+
+    return memories
