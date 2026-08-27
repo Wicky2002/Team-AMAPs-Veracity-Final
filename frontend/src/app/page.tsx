@@ -823,6 +823,22 @@ export default function Home() {
     return null;
   };
 
+  // ui_render events are re-emitted "current state" snapshots (e.g. the
+  // backend resends the full LinkedIn post grid / channel picker / variant
+  // grid every time outreach re-runs) rather than incremental deltas -- so
+  // rendering every historical instance just stacks up duplicates of the
+  // same card. Keep only the latest instance of each ui_render component;
+  // node_started/signal_found/warning/loop_complete stay as a true log.
+  const lastUiRenderIndexByComponent = new Map<string, number>();
+  events.forEach((event, index) => {
+    if (event.type === 'ui_render') {
+      lastUiRenderIndexByComponent.set(event.component, index);
+    }
+  });
+  const visibleEvents = events.filter(
+    (event, index) => event.type !== 'ui_render' || lastUiRenderIndexByComponent.get(event.component) === index,
+  );
+
   return (
     <main className="mx-auto flex w-full max-w-7xl flex-col gap-6 p-4 md:p-6">
       <header className="rounded-2xl border border-slate-200/70 bg-white/75 p-5 shadow-lg shadow-slate-200/40 backdrop-blur dark:border-slate-800 dark:bg-slate-950/65 dark:shadow-none">
@@ -921,7 +937,7 @@ export default function Home() {
               No runtime events yet. Start the loop to stream research, variant generation, and feedback actions.
             </div>
           ) : (
-            <div className="space-y-3">{events.map((event, i) => renderEvent(event, i))}</div>
+            <div className="space-y-3">{visibleEvents.map((event, i) => renderEvent(event, i))}</div>
           )}
         </section>
 

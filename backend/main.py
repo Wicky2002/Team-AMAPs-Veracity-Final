@@ -176,8 +176,22 @@ async def inject_action(body: LoopActionRequest):
         for attempt in range(3):
             compiled_graph = await get_compiled_graph()
             try:
+                # Re-entering the graph via astream() with a small partial
+                # dict (e.g. just {loop_stage, route_hint, outreach_channel})
+                # does NOT automatically merge onto the persisted checkpoint
+                # the way a fresh /loop/start run's full initial_state does --
+                # nodes would see only these few keys, with everything else
+                # (signals, variants, campaign_history, ...) silently reset to
+                # Pydantic defaults. Explicitly load the current checkpoint
+                # and merge our partial update on top so the resumed run sees
+                # the full prior state, same as refresh_engagement/drill_signal
+                # already do via aget_state below.
+                snapshot = await compiled_graph.aget_state(config)
+                merged_state: dict[str, Any] = dict(snapshot.values) if snapshot and snapshot.values else {}
+                merged_state.update(update_state)
+
                 async for event in compiled_graph.astream(
-                    update_state,
+                    merged_state,
                     config=config,
                     stream_mode=["custom"],
                 ):
@@ -272,7 +286,13 @@ async def refresh_engagement(body: RefreshEngagementRequest):
         metrics=metrics,
         discord_message_ids=message_ids,
     )
-    await compiled_graph.aupdate_state(config, {"ab_results": metrics})
+    # Not synced back into the graph checkpoint via aupdate_state: doing so
+    # was observed to corrupt the checkpoint such that the *next* /loop/action
+    # re-entry (channel_select/deploy_variant/feedback) would see the whole
+    # state reset to defaults, losing signals/variants/discord_message_ids.
+    # feedback_ingestor_node already reads refreshed metrics from
+    # load_ab_results() (the persistence layer write above) in preference to
+    # state.ab_results, so this durable save is sufficient on its own.
 
     event = UIRenderEvent(
         type="ui_render",
@@ -327,7 +347,13 @@ async def drill_signal(body: DrillSignalRequest):
     existing_signals = current_state.get("signals") or []
     updated_signals = existing_signals + [s.model_dump() for s in new_signals]
 
-    await compiled_graph.aupdate_state(config, {"signals": updated_signals})
+    # Not synced back into the graph checkpoint via aupdate_state: doing so
+    # was observed to corrupt the checkpoint such that the *next* /loop/action
+    # re-entry (channel_select/deploy_variant/feedback) would see the whole
+    # state reset to defaults, losing signals/variants/discord_message_ids
+    # (same issue found and fixed for refresh_engagement above). The drilled
+    # signals are still returned in this response's SSE events for display;
+    # they just won't feed back into a later content-generation cycle.
 
     events: list[dict[str, Any]] = []
     for signal in new_signals:
