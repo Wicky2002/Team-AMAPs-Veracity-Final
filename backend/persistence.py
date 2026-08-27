@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 try:
@@ -14,7 +15,7 @@ except Exception:  # pragma: no cover - optional dependency guard
     dict_row = None
     Json = None
 
-from state import OutreachVariant, SignalReference
+from state import CycleResult, OutreachVariant, SignalReference
 
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE EXTENSION IF NOT EXISTS pgcrypto",
@@ -41,6 +42,22 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         created_at TIMESTAMPTZ DEFAULT NOW()
     )
     """,
+    "ALTER TABLE ab_results ADD COLUMN IF NOT EXISTS image_url TEXT",
+    "ALTER TABLE ab_results ADD COLUMN IF NOT EXISTS discord_message_id TEXT",
+    """
+    CREATE TABLE IF NOT EXISTS campaign_history (
+        id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        cycle_n INTEGER NOT NULL,
+        top_signal TEXT,
+        winning_variant TEXT,
+        open_rate FLOAT,
+        reply_rate FLOAT,
+        angle TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+    "ALTER TABLE campaign_history ADD COLUMN IF NOT EXISTS channel TEXT",
 )
 
 _tables_ready = False
@@ -187,6 +204,7 @@ async def save_ab_results(
     cycle_n: int,
     variants: list[OutreachVariant],
     metrics: list[dict[str, Any]],
+    discord_message_ids: list[str] | None = None,
 ) -> None:
     if not metrics:
         return
@@ -206,12 +224,22 @@ async def save_ab_results(
                 except Exception:
                     idx = 0
 
-                hypothesis = variants[idx].hypothesis if 0 <= idx < len(variants) else None
+                variant = variants[idx] if 0 <= idx < len(variants) else None
+                hypothesis = variant.hypothesis if variant else None
+                image_url = variant.image_url if variant else None
+                discord_message_id = (
+                    discord_message_ids[idx]
+                    if discord_message_ids and 0 <= idx < len(discord_message_ids)
+                    else None
+                )
 
                 await cur.execute(
                     """
-                    INSERT INTO ab_results (thread_id, cycle_n, variant_id, hypothesis, open_rate, reply_rate, ctr)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO ab_results (
+                        thread_id, cycle_n, variant_id, hypothesis,
+                        open_rate, reply_rate, ctr, image_url, discord_message_id
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         thread_id,
@@ -221,6 +249,8 @@ async def save_ab_results(
                         float(metric.get("open_rate", 0.0)),
                         float(metric.get("reply_rate", 0.0)),
                         float(metric.get("click_rate", metric.get("ctr", 0.0))),
+                        image_url,
+                        discord_message_id,
                     ),
                 )
     except Exception:
@@ -278,6 +308,94 @@ async def load_ab_results(thread_id: str, cycle_n: int) -> list[dict[str, Any]] 
                 }
             )
         return metrics
+    except Exception:
+        return None
+    finally:
+        await conn.close()
+
+
+async def save_campaign_history(*, thread_id: str, cycle_result: CycleResult) -> None:
+    """Persist one closed cycle's result so cross-cycle learning is durable and
+    queryable outside of the LangGraph checkpoint (needed for a real-time view)."""
+    if not await ensure_phase3_tables():
+        return
+
+    conn = await _connect()
+    if conn is None:
+        return
+
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO campaign_history (
+                    thread_id, cycle_n, top_signal, winning_variant, open_rate, reply_rate, angle, channel
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    thread_id,
+                    cycle_result.cycle_n,
+                    cycle_result.top_signal,
+                    cycle_result.winning_variant,
+                    cycle_result.open_rate,
+                    cycle_result.reply_rate,
+                    cycle_result.angle,
+                    cycle_result.channel,
+                ),
+            )
+    except Exception:
+        return
+    finally:
+        await conn.close()
+
+
+async def load_campaign_history(thread_id: str) -> list[CycleResult] | None:
+    if not await ensure_phase3_tables():
+        return None
+
+    conn = await _connect()
+    if conn is None:
+        return None
+
+    try:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                """
+                SELECT cycle_n, top_signal, winning_variant, open_rate, reply_rate, angle, channel, created_at
+                FROM campaign_history
+                WHERE thread_id = %s
+                ORDER BY created_at ASC
+                """,
+                (thread_id,),
+            )
+            rows = await cur.fetchall()
+
+        if not rows:
+            return None
+
+        history: list[CycleResult] = []
+        for row in rows:
+            try:
+                history.append(
+                    CycleResult(
+                        cycle_n=int(row.get("cycle_n", 0)),
+                        top_signal=str(row.get("top_signal") or ""),
+                        winning_variant=str(row.get("winning_variant") or ""),
+                        open_rate=float(row.get("open_rate") or 0.0),
+                        reply_rate=float(row.get("reply_rate") or 0.0),
+                        angle=row.get("angle") or "competitor_gap",
+                        channel=row.get("channel") or None,
+                        timestamp=(
+                            row.get("created_at").isoformat()
+                            if row.get("created_at")
+                            else datetime.now(timezone.utc).isoformat()
+                        ),
+                    )
+                )
+            except Exception:
+                continue
+        return history or None
     except Exception:
         return None
     finally:

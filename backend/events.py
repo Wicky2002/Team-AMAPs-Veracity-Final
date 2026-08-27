@@ -15,7 +15,7 @@ class NodeStartedEvent(BaseModel):
 
 class SignalFoundEvent(BaseModel):
     type: Literal["signal_found"]
-    source: Literal["competitor", "audience", "pestel"]
+    source: Literal["competitor", "audience", "pestel", "adjacent", "temporal", "channel"]
     content: str
     confidence: float
     quote: str

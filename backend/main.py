@@ -9,9 +9,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from events import SSEEvent, WarningEvent, normalize_event
+from constants import UIComponent
+from drill_down import drill_into_signal
+from events import SSEEvent, UIRenderEvent, WarningEvent, normalize_event
 from graph_builder import get_compiled_graph, reset_compiled_graph
-from state import empty_agent_state
+from graph_nodes import reaction_counts_to_metrics
+from mcp_tools.discord_channel import DiscordNotConfigured, get_message_reaction_counts
+from mcp_tools.resend_channel import ResendNotConfigured, get_email_status
+from persistence import save_ab_results
+from state import OutreachVariant, empty_agent_state
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
@@ -30,6 +36,7 @@ app.add_middleware(
 class LoopStartRequest(BaseModel):
     thread_id: str
     message: str
+    product_name: str | None = None
 
 
 class LoopActionRequest(BaseModel):
@@ -37,6 +44,21 @@ class LoopActionRequest(BaseModel):
     action_type: Literal["feedback", "channel_select", "deploy_variant"] = "feedback"
     payload: dict[str, Any] = Field(default_factory=dict)
     message: str = ""
+
+
+class RefreshEngagementRequest(BaseModel):
+    thread_id: str
+
+
+class RefreshEmailStatusRequest(BaseModel):
+    thread_id: str
+
+
+class DrillSignalRequest(BaseModel):
+    thread_id: str
+    source_type: str
+    source: str
+    quote: str
 
 
 def _sse_line(payload: SSEEvent, event_name: str | None = None) -> str:
@@ -77,7 +99,11 @@ def read_root() -> dict[str, str]:
 async def start_loop(body: LoopStartRequest):
     async def stream():
         config = {"configurable": {"thread_id": body.thread_id}}
-        initial_state = empty_agent_state(message=body.message, thread_id=body.thread_id)
+        initial_state = empty_agent_state(
+            message=body.message,
+            thread_id=body.thread_id,
+            product_name=body.product_name,
+        )
 
         try:
             for attempt in range(3):
@@ -189,4 +215,217 @@ async def inject_action(body: LoopActionRequest):
         "applied_action": body.action_type,
         "event_count": len(events),
         "latest_events": events[-10:],
+    }
+
+
+@app.post("/loop/refresh_engagement")
+async def refresh_engagement(body: RefreshEngagementRequest):
+    """Poll live Discord reaction counts, persist them, and return fresh
+    feedback-panel metrics -- the "real-time" refresh action for the currently
+    deployed variants, independent of the main graph traversal."""
+    config = {"configurable": {"thread_id": body.thread_id}}
+    compiled_graph = await get_compiled_graph()
+
+    snapshot = await compiled_graph.aget_state(config)
+    current_state = snapshot.values if snapshot else {}
+
+    message_ids: list[str] = current_state.get("discord_message_ids") or []
+    raw_variants = current_state.get("variants") or []
+    cycle_n = int(current_state.get("cycle_n", 0))
+    campaign_history = current_state.get("campaign_history") or []
+
+    if not message_ids:
+        warning = WarningEvent(
+            type="warning",
+            message="No Discord messages to refresh yet for this thread.",
+            fallback_used=True,
+        )
+        return {"status": "no_messages", "thread_id": body.thread_id, "latest_events": [warning.model_dump()]}
+
+    try:
+        counts: list[int] = []
+        for message_id in message_ids:
+            reaction_counts = await get_message_reaction_counts(message_id=message_id)
+            counts.append(sum(reaction_counts.values()))
+    except DiscordNotConfigured:
+        warning = WarningEvent(
+            type="warning",
+            message="Discord channel not configured; cannot refresh engagement.",
+            fallback_used=True,
+        )
+        return {"status": "degraded", "thread_id": body.thread_id, "latest_events": [warning.model_dump()]}
+    except Exception as exc:
+        warning = WarningEvent(
+            type="warning",
+            message=f"Could not refresh Discord reactions: {str(exc)[:160]}",
+            fallback_used=True,
+        )
+        return {"status": "degraded", "thread_id": body.thread_id, "latest_events": [warning.model_dump()]}
+
+    metrics = reaction_counts_to_metrics(counts)
+    variants = [OutreachVariant.model_validate(v) for v in raw_variants]
+
+    await save_ab_results(
+        thread_id=body.thread_id,
+        cycle_n=cycle_n,
+        variants=variants,
+        metrics=metrics,
+        discord_message_ids=message_ids,
+    )
+    await compiled_graph.aupdate_state(config, {"ab_results": metrics})
+
+    event = UIRenderEvent(
+        type="ui_render",
+        component=UIComponent.FEEDBACK_PANEL,
+        props={
+            "metrics": metrics,
+            "campaign_history": campaign_history,
+            "discord_message_ids": message_ids,
+        },
+        cycle_n=cycle_n,
+    )
+
+    return {
+        "status": "ok",
+        "thread_id": body.thread_id,
+        "latest_events": [event.model_dump()],
+    }
+
+
+@app.post("/loop/drill_signal")
+async def drill_signal(body: DrillSignalRequest):
+    """One bounded sub-investigation on a single existing signal -- doc 8.2's
+    "sub-investigations when a thread branches", capped at exactly one
+    follow-up hop, no recursion."""
+    config = {"configurable": {"thread_id": body.thread_id}}
+    compiled_graph = await get_compiled_graph()
+
+    try:
+        new_signals = await drill_into_signal(
+            quote=body.quote,
+            source=body.source,
+            source_type=body.source_type,
+        )
+    except Exception as exc:
+        warning = WarningEvent(
+            type="warning",
+            message=f"Drill-down failed: {str(exc)[:160]}",
+            fallback_used=True,
+        )
+        return {"status": "degraded", "thread_id": body.thread_id, "latest_events": [warning.model_dump()]}
+
+    if not new_signals:
+        warning = WarningEvent(
+            type="warning",
+            message="Drill-down found no additional detail on this signal.",
+            fallback_used=True,
+        )
+        return {"status": "no_results", "thread_id": body.thread_id, "latest_events": [warning.model_dump()]}
+
+    snapshot = await compiled_graph.aget_state(config)
+    current_state = snapshot.values if snapshot else {}
+    existing_signals = current_state.get("signals") or []
+    updated_signals = existing_signals + [s.model_dump() for s in new_signals]
+
+    await compiled_graph.aupdate_state(config, {"signals": updated_signals})
+
+    events: list[dict[str, Any]] = []
+    for signal in new_signals:
+        events.append(
+            {
+                "type": "signal_found",
+                "source": signal.source_type,
+                "content": signal.content,
+                "confidence": signal.confidence,
+                "quote": signal.raw_quote,
+            }
+        )
+
+    board_event = UIRenderEvent(
+        type="ui_render",
+        component=UIComponent.SIGNAL_BOARD,
+        props={
+            "signals": [
+                {
+                    "source_type": s.get("source_type"),
+                    "source": s.get("source"),
+                    "source_url": s.get("source_url"),
+                    "quote": s.get("quote"),
+                    "raw_quote": s.get("raw_quote"),
+                    "content": s.get("content"),
+                    "confidence": s.get("confidence"),
+                }
+                for s in updated_signals
+            ]
+        },
+        cycle_n=int(current_state.get("cycle_n", 0)),
+    )
+    events.append(board_event.model_dump())
+
+    return {
+        "status": "ok",
+        "thread_id": body.thread_id,
+        "latest_events": events,
+    }
+
+
+@app.post("/loop/refresh_email_status")
+async def refresh_email_status(body: RefreshEmailStatusRequest):
+    """Poll Resend for the real delivery/open/click status of the sent
+    variant emails -- informational alongside the Discord-driven metrics that
+    power winner selection, since Resend's status doesn't cleanly convert to
+    the same open/reply/click-rate shape without also being sent to the same
+    audience Discord reactions come from."""
+    config = {"configurable": {"thread_id": body.thread_id}}
+    compiled_graph = await get_compiled_graph()
+
+    snapshot = await compiled_graph.aget_state(config)
+    current_state = snapshot.values if snapshot else {}
+    email_ids: list[str] = current_state.get("resend_email_ids") or []
+
+    if not email_ids:
+        warning = WarningEvent(
+            type="warning",
+            message="No emails sent yet for this thread.",
+            fallback_used=True,
+        )
+        return {"status": "no_messages", "thread_id": body.thread_id, "latest_events": [warning.model_dump()]}
+
+    statuses: list[dict[str, Any]] = []
+    try:
+        for idx, email_id in enumerate(email_ids):
+            result = await get_email_status(email_id)
+            statuses.append({"variant": idx, "email_id": email_id, "status": result.get("last_event", "unknown")})
+    except ResendNotConfigured:
+        warning = WarningEvent(
+            type="warning",
+            message="Email channel not configured; cannot refresh status.",
+            fallback_used=True,
+        )
+        return {"status": "degraded", "thread_id": body.thread_id, "latest_events": [warning.model_dump()]}
+    except Exception as exc:
+        warning = WarningEvent(
+            type="warning",
+            message=f"Could not refresh email status: {str(exc)[:160]}",
+            fallback_used=True,
+        )
+        return {"status": "degraded", "thread_id": body.thread_id, "latest_events": [warning.model_dump()]}
+
+    event = UIRenderEvent(
+        type="ui_render",
+        component=UIComponent.FEEDBACK_PANEL,
+        props={
+            "metrics": current_state.get("ab_results") or [],
+            "campaign_history": current_state.get("campaign_history") or [],
+            "discord_message_ids": current_state.get("discord_message_ids") or [],
+            "resend_email_ids": email_ids,
+            "email_statuses": statuses,
+        },
+        cycle_n=int(current_state.get("cycle_n", 0)),
+    )
+
+    return {
+        "status": "ok",
+        "thread_id": body.thread_id,
+        "latest_events": [event.model_dump()],
     }

@@ -12,6 +12,7 @@ import { LinkedInPostGrid } from '@/components/LinkedInPostGrid';
 import { SignalIntelligenceBoard } from '@/components/SignalIntelligenceBoard';
 import type {
   CampaignBrief,
+  EmailStatus,
   FeedbackMetric,
   LinkedInPost,
   OutreachVariant,
@@ -37,7 +38,19 @@ const toSignals = (props: Record<string, unknown>): SignalReference[] => {
 
     const sourceType = signal.source_type;
     const normalizedSourceType: SignalReference['source_type'] =
-      sourceType === 'competitor' || sourceType === 'audience' || sourceType === 'pestel' ? sourceType : undefined;
+      sourceType === 'competitor' ||
+      sourceType === 'audience' ||
+      sourceType === 'pestel' ||
+      sourceType === 'adjacent' ||
+      sourceType === 'temporal'
+        ? sourceType
+        : undefined;
+
+    const credibilityTier = signal.credibility_tier;
+    const normalizedCredibilityTier: SignalReference['credibility_tier'] =
+      credibilityTier === 'high' || credibilityTier === 'mid' || credibilityTier === 'unverified'
+        ? credibilityTier
+        : undefined;
 
     return [
       {
@@ -47,6 +60,7 @@ const toSignals = (props: Record<string, unknown>): SignalReference[] => {
         content: typeof signal.content === 'string' ? signal.content : undefined,
         confidence: Number(signal.confidence ?? 0.5),
         source_type: normalizedSourceType,
+        credibility_tier: normalizedCredibilityTier,
       },
     ];
   });
@@ -71,7 +85,13 @@ const toVariants = (props: Record<string, unknown>): OutreachVariant[] => {
 
       const sourceType = sig.source_type;
       const normalizedSourceType: SignalReference['source_type'] =
-        sourceType === 'competitor' || sourceType === 'audience' || sourceType === 'pestel' ? sourceType : undefined;
+        sourceType === 'competitor' ||
+        sourceType === 'audience' ||
+        sourceType === 'pestel' ||
+        sourceType === 'adjacent' ||
+        sourceType === 'temporal'
+          ? sourceType
+          : undefined;
 
       return [
         {
@@ -93,6 +113,28 @@ const toVariants = (props: Record<string, unknown>): OutreachVariant[] => {
         cta: String(variant.cta ?? ''),
         hypothesis: String(variant.hypothesis ?? 'Unknown hypothesis'),
         provenance_chain: provenanceChain,
+        image_url: typeof variant.image_url === 'string' ? variant.image_url : undefined,
+      },
+    ];
+  });
+};
+
+const toEmailStatuses = (props: Record<string, unknown>): EmailStatus[] => {
+  const raw = props.email_statuses;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  return raw.flatMap((item) => {
+    if (!isRecord(item)) {
+      return [];
+    }
+
+    return [
+      {
+        variant: Number(item.variant ?? 0),
+        email_id: String(item.email_id ?? ''),
+        status: String(item.status ?? 'unknown'),
       },
     ];
   });
@@ -220,7 +262,11 @@ const isSSEEvent = (value: unknown): value is SSEEvent => {
       return typeof value.node === 'string' && typeof value.cycle_n === 'number';
     case 'signal_found':
       return (
-        (value.source === 'competitor' || value.source === 'audience' || value.source === 'pestel') &&
+        (value.source === 'competitor' ||
+          value.source === 'audience' ||
+          value.source === 'pestel' ||
+          value.source === 'adjacent' ||
+          value.source === 'temporal') &&
         typeof value.content === 'string' &&
         typeof value.quote === 'string' &&
         typeof value.confidence === 'number'
@@ -253,6 +299,7 @@ const isSSEEvent = (value: unknown): value is SSEEvent => {
 
 export default function Home() {
   const [message, setMessage] = useState('Is Lilian well-positioned in the AI SDR market?');
+  const [productName, setProductName] = useState('Lilian (Vector Agents AI SDR)');
   const [events, setEvents] = useState<SSEEvent[]>([]);
   const [rawEvents, setRawEvents] = useState<string[]>([]);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
@@ -302,6 +349,7 @@ export default function Home() {
     const params = new URLSearchParams({
       thread_id: activeThreadId,
       message,
+      product_name: productName,
     });
 
     setStatus('running');
@@ -419,6 +467,146 @@ export default function Home() {
     }
   };
 
+  const refreshEngagement = async () => {
+    const activeThreadId = resolveThreadId();
+
+    try {
+      const response = await fetch('/api/loop/refresh', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ thread_id: activeThreadId }),
+      });
+
+      const result = (await response.json().catch(() => null)) as
+        | {
+            latest_events?: unknown[];
+            error?: unknown;
+            detail?: unknown;
+          }
+        | null;
+
+      if (!response.ok) {
+        const reason = extractActionErrorMessage(result) ?? `HTTP ${response.status}`;
+        emitActionWarning(`Refresh failed. ${reason}`);
+        return;
+      }
+
+      if (!result || !Array.isArray(result.latest_events)) {
+        emitActionWarning('Refresh completed, but the backend returned no renderable events.');
+        return;
+      }
+
+      for (const event of result.latest_events) {
+        if (!isSSEEvent(event)) {
+          continue;
+        }
+
+        appendEvent(JSON.stringify(event));
+        applyTypedEvent(event);
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'Unknown network error';
+      emitActionWarning(`Could not reach refresh endpoint. ${reason}`);
+    }
+  };
+
+  const refreshEmailStatus = async () => {
+    const activeThreadId = resolveThreadId();
+
+    try {
+      const response = await fetch('/api/loop/refresh-email', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ thread_id: activeThreadId }),
+      });
+
+      const result = (await response.json().catch(() => null)) as
+        | {
+            latest_events?: unknown[];
+            error?: unknown;
+            detail?: unknown;
+          }
+        | null;
+
+      if (!response.ok) {
+        const reason = extractActionErrorMessage(result) ?? `HTTP ${response.status}`;
+        emitActionWarning(`Email status refresh failed. ${reason}`);
+        return;
+      }
+
+      if (!result || !Array.isArray(result.latest_events)) {
+        emitActionWarning('Email status refresh completed, but the backend returned no renderable events.');
+        return;
+      }
+
+      for (const event of result.latest_events) {
+        if (!isSSEEvent(event)) {
+          continue;
+        }
+
+        appendEvent(JSON.stringify(event));
+        applyTypedEvent(event);
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'Unknown network error';
+      emitActionWarning(`Could not reach email status endpoint. ${reason}`);
+    }
+  };
+
+  const drillSignal = async (signal: SignalReference) => {
+    const activeThreadId = resolveThreadId();
+
+    try {
+      const response = await fetch('/api/loop/drill', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          thread_id: activeThreadId,
+          source_type: signal.source_type ?? 'audience',
+          source: signal.source,
+          quote: signal.raw_quote ?? signal.quote,
+        }),
+      });
+
+      const result = (await response.json().catch(() => null)) as
+        | {
+            latest_events?: unknown[];
+            error?: unknown;
+            detail?: unknown;
+          }
+        | null;
+
+      if (!response.ok) {
+        const reason = extractActionErrorMessage(result) ?? `HTTP ${response.status}`;
+        emitActionWarning(`Drill-down failed. ${reason}`);
+        return;
+      }
+
+      if (!result || !Array.isArray(result.latest_events)) {
+        emitActionWarning('Drill-down completed, but the backend returned no renderable events.');
+        return;
+      }
+
+      for (const event of result.latest_events) {
+        if (!isSSEEvent(event)) {
+          continue;
+        }
+
+        appendEvent(JSON.stringify(event));
+        applyTypedEvent(event);
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'Unknown network error';
+      emitActionWarning(`Could not reach drill-down endpoint. ${reason}`);
+    }
+  };
+
   const renderEvent = (event: SSEEvent, index: number) => {
     if (event.type === 'node_started') {
       return (
@@ -449,7 +637,13 @@ export default function Home() {
     if (event.type === 'ui_render') {
       switch (event.component) {
         case UI_COMPONENT.SIGNAL_BOARD:
-          return <SignalIntelligenceBoard key={`ui-signal-${index}`} signals={toSignals(event.props)} />;
+          return (
+            <SignalIntelligenceBoard
+              key={`ui-signal-${index}`}
+              signals={toSignals(event.props)}
+              onDrill={(signal) => drillSignal(signal)}
+            />
+          );
         case UI_COMPONENT.AB_GRID:
           return (
             <ABVariantGrid
@@ -475,13 +669,25 @@ export default function Home() {
             <FeedbackPanel
               key={`ui-feedback-${index}`}
               metrics={toMetrics(event.props)}
+              emailStatuses={toEmailStatuses(event.props)}
+              onRefresh={() => {
+                void refreshEngagement();
+              }}
+              onRefreshEmail={() => {
+                void refreshEmailStatus();
+              }}
               onFeedback={() => {
                 const metrics = toMetrics(event.props);
                 const winner = metrics.length > 0 ? metrics.reduce((a, b) => (a.reply_rate > b.reply_rate ? a : b)) : null;
+                const winnerLabel = winner ? `Variant ${String.fromCharCode(65 + winner.variant)}` : 'Variant A';
                 void sendAction('feedback', {
-                  note: 'The ROI angle got 3x the reply rate.',
-                  angle: 'roi',
-                  winning_variant: winner ? `Variant ${String.fromCharCode(65 + winner.variant)}` : 'Variant B',
+                  note: winner
+                    ? `${winnerLabel} led with a ${(winner.reply_rate * 100).toFixed(1)}% share of live Discord engagement.`
+                    : 'No engagement recorded yet for this cycle.',
+                  // angle is intentionally omitted here -- the backend infers it
+                  // from the actual winning variant's hypothesis instead of us
+                  // guessing/overriding it from the frontend.
+                  winning_variant: winnerLabel,
                   open_rate: winner?.open_rate,
                   reply_rate: winner?.reply_rate,
                   click_rate: winner?.click_rate,
@@ -584,6 +790,13 @@ export default function Home() {
         </div>
 
         <div className="mt-4 flex flex-col gap-2 md:flex-row">
+          <input
+            className="w-full rounded-xl border border-slate-300 bg-white/90 px-4 py-2.5 text-sm shadow-inner outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 md:w-56 dark:border-slate-700 dark:bg-slate-900/90 dark:focus:border-indigo-400 dark:focus:ring-indigo-900"
+            value={productName}
+            onChange={(e) => setProductName(e.target.value)}
+            placeholder="Product name (any product, not just Lilian)"
+            title="The loop generalises to any product -- change this to run it against something else"
+          />
           <input
             className="flex-1 rounded-xl border border-slate-300 bg-white/90 px-4 py-2.5 text-sm shadow-inner outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 dark:border-slate-700 dark:bg-slate-900/90 dark:focus:border-indigo-400 dark:focus:ring-indigo-900"
             value={message}

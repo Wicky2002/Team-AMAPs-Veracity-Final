@@ -8,6 +8,7 @@ const BACKEND_URL = process.env.BACKEND_URL ?? 'http://127.0.0.1:8000';
 export async function GET(request: NextRequest) {
   const message = request.nextUrl.searchParams.get('message') ?? 'Is Lilian well-positioned in AI SDR?';
   const threadId = request.nextUrl.searchParams.get('thread_id') ?? crypto.randomUUID();
+  const productName = request.nextUrl.searchParams.get('product_name') || undefined;
 
   const upstream = await fetch(`${BACKEND_URL}/loop/start`, {
     method: 'POST',
@@ -17,6 +18,7 @@ export async function GET(request: NextRequest) {
     body: JSON.stringify({
       message,
       thread_id: threadId,
+      product_name: productName,
     }),
     cache: 'no-store',
   });

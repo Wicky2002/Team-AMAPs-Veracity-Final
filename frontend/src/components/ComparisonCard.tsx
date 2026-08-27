@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef } from 'react';
+import { useCallback, useState } from 'react';
 
 interface CompetitorEntry {
   name: string;
@@ -94,76 +94,8 @@ function buildStandaloneHTML(props: Props): string {
 </html>`;
 }
 
-function renderToPNG(element: HTMLElement): Promise<Blob> {
-  return new Promise((resolve, reject) => {
-    const canvas = document.createElement('canvas');
-    const scale = 2;
-    const rect = element.getBoundingClientRect();
-    canvas.width = rect.width * scale;
-    canvas.height = rect.height * scale;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) {
-      reject(new Error('Canvas not supported'));
-      return;
-    }
-
-    const svgData = `
-      <foreignObject width="${rect.width}" height="${rect.height}">
-        <div xmlns="http://www.w3.org/1999/xhtml">
-          ${element.outerHTML}
-        </div>
-      </foreignObject>
-    `;
-    const svgBlob = new Blob(
-      [
-        `<svg xmlns="http://www.w3.org/2000/svg" width="${rect.width * scale}" height="${rect.height * scale}" viewBox="0 0 ${rect.width} ${rect.height}">${svgData}</svg>`,
-      ],
-      { type: 'image/svg+xml;charset=utf-8' }
-    );
-    const url = URL.createObjectURL(svgBlob);
-    const resolveHtmlFallback = () => {
-      resolve(new Blob([element.outerHTML], { type: 'text/html' }));
-    };
-
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      try {
-        ctx.drawImage(img, 0, 0);
-      } catch {
-        URL.revokeObjectURL(url);
-        resolveHtmlFallback();
-        return;
-      }
-
-      URL.revokeObjectURL(url);
-
-      try {
-        canvas.toBlob(
-          (blob) => {
-            if (blob) {
-              resolve(blob);
-              return;
-            }
-            resolveHtmlFallback();
-          },
-          'image/png',
-          1.0
-        );
-      } catch {
-        resolveHtmlFallback();
-      }
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      resolveHtmlFallback();
-    };
-    img.src = url;
-  });
-}
-
 export function ComparisonCard({ title, subtitle, competitors, market_insight }: Props) {
-  const cardRef = useRef<HTMLDivElement>(null);
+  const [isDownloadingPng, setIsDownloadingPng] = useState(false);
 
   const handleDownloadHTML = useCallback(() => {
     const html = buildStandaloneHTML({ title, subtitle, competitors, market_insight });
@@ -172,15 +104,26 @@ export function ComparisonCard({ title, subtitle, competitors, market_insight }:
   }, [title, subtitle, competitors, market_insight]);
 
   const handleDownloadPNG = useCallback(async () => {
-    if (!cardRef.current) return;
+    // Server-rendered via next/og (Satori) from the same structured data --
+    // deterministic and data-accurate, not a client-side canvas screenshot.
+    setIsDownloadingPng(true);
     try {
-      const blob = await renderToPNG(cardRef.current);
-      downloadBlob(blob, blob.type.includes('html') ? 'comparison-card.html' : 'comparison-card.png');
+      const response = await fetch('/api/og/comparison', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, subtitle, competitors, market_insight }),
+      });
+      if (!response.ok) {
+        throw new Error(`OG image route returned ${response.status}`);
+      }
+      const blob = await response.blob();
+      downloadBlob(blob, 'comparison-card.png');
     } catch {
-      // Fallback to HTML download on any canvas/security error
       handleDownloadHTML();
+    } finally {
+      setIsDownloadingPng(false);
     }
-  }, [handleDownloadHTML]);
+  }, [title, subtitle, competitors, market_insight, handleDownloadHTML]);
 
   return (
     <section className="rounded-2xl border border-slate-200/70 bg-white/80 p-5 shadow-lg shadow-slate-200/40 backdrop-blur dark:border-slate-800 dark:bg-slate-950/65 dark:shadow-none">
@@ -199,15 +142,16 @@ export function ComparisonCard({ title, subtitle, competitors, market_insight }:
           </button>
           <button
             type="button"
+            disabled={isDownloadingPng}
             onClick={() => void handleDownloadPNG()}
-            className="rounded-lg bg-linear-to-r from-indigo-600 to-blue-600 px-3 py-1.5 text-xs font-semibold text-white shadow transition hover:from-indigo-500 hover:to-blue-500"
+            className="rounded-lg bg-linear-to-r from-indigo-600 to-blue-600 px-3 py-1.5 text-xs font-semibold text-white shadow transition hover:from-indigo-500 hover:to-blue-500 disabled:opacity-60"
           >
-            ↓ PNG
+            {isDownloadingPng ? 'Rendering…' : '↓ PNG'}
           </button>
         </div>
       </div>
 
-      <div ref={cardRef} className="rounded-xl border border-slate-200 bg-slate-50/90 p-4 dark:border-slate-800 dark:bg-slate-900/70">
+      <div className="rounded-xl border border-slate-200 bg-slate-50/90 p-4 dark:border-slate-800 dark:bg-slate-900/70">
         <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
           {competitors.map((comp) => (
             <article
