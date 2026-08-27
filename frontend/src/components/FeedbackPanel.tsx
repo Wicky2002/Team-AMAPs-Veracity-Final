@@ -1,11 +1,14 @@
-import type { FeedbackMetric } from '@/lib/loop-types';
+import type { EmailStatus, FeedbackMetric } from '@/lib/loop-types';
 
 type Props = {
   metrics: FeedbackMetric[];
   onFeedback: () => void;
+  onRefresh?: () => void;
+  emailStatuses?: EmailStatus[];
+  onRefreshEmail?: () => void;
 };
 
-export function FeedbackPanel({ metrics, onFeedback }: Props) {
+export function FeedbackPanel({ metrics, onFeedback, onRefresh, emailStatuses = [], onRefreshEmail }: Props) {
   const winner = metrics.length > 0 ? metrics.reduce((a, b) => (a.reply_rate > b.reply_rate ? a : b)) : null;
 
   const metricBar = (value: number) => `${Math.max(0, Math.min(100, value * 100))}%`;
@@ -59,13 +62,45 @@ export function FeedbackPanel({ metrics, onFeedback }: Props) {
           );
         })}
       </div>
-      <button
-        type="button"
-        onClick={onFeedback}
-        className="mt-4 rounded-lg bg-linear-to-r from-emerald-600 to-teal-600 px-4 py-2 text-sm font-semibold text-white shadow-md transition hover:from-emerald-500 hover:to-teal-500"
-      >
-        Feed Results Back →
-      </button>
+
+      {emailStatuses.length > 0 && (
+        <div className="mt-4 space-y-1 rounded-xl border border-slate-200 bg-slate-50/80 p-3 text-xs dark:border-slate-800 dark:bg-slate-900/50">
+          <p className="font-semibold text-slate-700 dark:text-slate-200">Email Delivery</p>
+          {emailStatuses.map((e) => (
+            <p key={e.email_id} className="text-slate-600 dark:text-slate-300">
+              Variant {String.fromCharCode(65 + e.variant)}: {e.status}
+            </p>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        {onRefresh && (
+          <button
+            type="button"
+            onClick={onRefresh}
+            className="rounded-lg border border-slate-300 bg-white/90 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            ↻ Refresh Reactions
+          </button>
+        )}
+        {onRefreshEmail && (
+          <button
+            type="button"
+            onClick={onRefreshEmail}
+            className="rounded-lg border border-slate-300 bg-white/90 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            ↻ Refresh Email Status
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onFeedback}
+          className="rounded-lg bg-linear-to-r from-emerald-600 to-teal-600 px-4 py-2 text-sm font-semibold text-white shadow-md transition hover:from-emerald-500 hover:to-teal-500"
+        >
+          Feed Results Back →
+        </button>
+      </div>
     </section>
   );
 }

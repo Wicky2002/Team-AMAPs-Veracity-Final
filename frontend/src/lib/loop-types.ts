@@ -3,13 +3,14 @@ import type { UIRenderComponent } from './ui-components';
 export type LoopStage = 'research' | 'generate' | 'ab' | 'outreach' | 'feedback';
 
 export interface SignalReference {
-  source_type?: 'competitor' | 'audience' | 'pestel';
+  source_type?: 'competitor' | 'audience' | 'pestel' | 'adjacent' | 'temporal' | 'channel';
   source: string;
   source_url?: string;
   content?: string;
   quote: string;
   confidence: number;
   raw_quote?: string;
+  credibility_tier?: 'high' | 'mid' | 'unverified';
 }
 
 export interface OutreachVariant {
@@ -18,6 +19,7 @@ export interface OutreachVariant {
   cta: string;
   hypothesis: string;
   provenance_chain: SignalReference[];
+  image_url?: string;
 }
 
 export interface FeedbackMetric {
@@ -25,6 +27,12 @@ export interface FeedbackMetric {
   open_rate: number;
   reply_rate: number;
   click_rate: number;
+}
+
+export interface EmailStatus {
+  variant: number;
+  email_id: string;
+  status: string;
 }
 
 export interface TimelineEntry {
@@ -64,7 +72,7 @@ export interface NodeStartedEvent {
 
 export interface SignalFoundEvent {
   type: 'signal_found';
-  source: 'competitor' | 'audience' | 'pestel';
+  source: 'competitor' | 'audience' | 'pestel' | 'adjacent' | 'temporal' | 'channel';
   content: string;
   confidence: number;
   quote: string;

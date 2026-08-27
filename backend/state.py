@@ -35,7 +35,7 @@ def guarded_stage_transition(current_stage: str, next_stage: str) -> str:
 
 
 class SignalReference(BaseModel):
-    source_type: Literal["competitor", "audience", "pestel"]
+    source_type: Literal["competitor", "audience", "pestel", "adjacent", "temporal", "channel"]
     source: str
     source_url: str | None = None
     content: str
@@ -50,6 +50,7 @@ class OutreachVariant(BaseModel):
     cta: str
     hypothesis: str
     provenance_chain: list[SignalReference] = Field(default_factory=list)
+    image_url: str | None = None
 
 
 class FeedbackEvent(BaseModel):
@@ -70,7 +71,11 @@ class CycleResult(BaseModel):
     open_rate: float
     reply_rate: float
     angle: Literal["competitor_gap", "roi", "social_proof"]
+    channel: Literal["LinkedIn", "Email", "Both"] | None = None
     timestamp: str = Field(default_factory=_utc_now_iso)
+
+
+DEFAULT_PRODUCT_NAME = "Lilian (Vector Agents AI SDR)"
 
 
 class AgentState(BaseModel):
@@ -78,6 +83,7 @@ class AgentState(BaseModel):
     loop_stage: Literal["research", "generate", "ab", "outreach", "feedback"] = "research"
     cycle_n: int = 0
     message: str = ""
+    product_name: str = DEFAULT_PRODUCT_NAME
     signals: list[SignalReference] = Field(default_factory=list)
     variants: list[OutreachVariant] = Field(default_factory=list)
     selected_variant: OutreachVariant | None = None
@@ -85,6 +91,8 @@ class AgentState(BaseModel):
     campaign_history: list[CycleResult] = Field(default_factory=list)
     ab_results: list[dict[str, Any]] = Field(default_factory=list)
     outreach_channel: str | None = None
+    discord_message_ids: list[str] = Field(default_factory=list)
+    resend_email_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def stage_guards(self):
@@ -93,8 +101,15 @@ class AgentState(BaseModel):
         return self
 
 
-def empty_agent_state(message: str = "", thread_id: str | None = None) -> dict[str, Any]:
-    return AgentState(message=message, thread_id=thread_id).model_dump()
+def empty_agent_state(
+    message: str = "",
+    thread_id: str | None = None,
+    product_name: str | None = None,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"message": message, "thread_id": thread_id}
+    if product_name:
+        kwargs["product_name"] = product_name
+    return AgentState(**kwargs).model_dump()
 
 
 def coerce_state(data: dict[str, Any]) -> AgentState:

@@ -14,7 +14,7 @@ import pytest
 
 from constants import ROUTE_END, ROUTE_LOOP_BACK
 from graph_nodes import feedback_ingestor_node, route_after_feedback
-from state import SignalReference
+from state import OutreachVariant, SignalReference
 
 
 def _signal(source_type: str, quote: str, confidence: float) -> SignalReference:
@@ -166,7 +166,11 @@ class TestFeedbackIngestor:
     @pytest.mark.asyncio
     async def test_signals_and_variants_are_not_cleared_by_feedback_ingestor(self, feedback_state_template: dict[str, Any]):
         original_signals = list(feedback_state_template["signals"])
-        original_variants = list(feedback_state_template["variants"])
+        # Normalize through the model so this stays valid as OutreachVariant gains
+        # new optional fields (e.g. image_url) that model_dump() will include.
+        original_variants = [
+            OutreachVariant.model_validate(v).model_dump() for v in feedback_state_template["variants"]
+        ]
 
         with patch("graph_nodes.load_ab_results", AsyncMock(return_value=None)):
             updated = await feedback_ingestor_node(feedback_state_template)

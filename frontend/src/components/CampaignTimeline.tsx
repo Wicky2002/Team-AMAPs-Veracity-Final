@@ -1,3 +1,4 @@
+import { AngleLearningChart } from '@/components/AngleLearningChart';
 import type { TimelineEntry } from '@/lib/loop-types';
 
 type Props = {
@@ -33,7 +34,9 @@ export function CampaignTimeline({ entries }: Props) {
           No cycle history yet. After feedback is fed back, you’ll see winner trends, signal quality, and performance by angle.
         </div>
       ) : (
-        <ol className="mt-4 space-y-3 text-sm">
+        <>
+          <AngleLearningChart entries={entries} />
+          <ol className="mt-4 space-y-3 text-sm">
           {entries.map((entry, idx) => (
             <li
               key={`${entry.cycle_n}-${entry.timestamp}-${idx}`}
@@ -58,7 +61,8 @@ export function CampaignTimeline({ entries }: Props) {
               <p className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">{new Date(entry.timestamp).toLocaleString()}</p>
             </li>
           ))}
-        </ol>
+          </ol>
+        </>
       )}
     </aside>
   );

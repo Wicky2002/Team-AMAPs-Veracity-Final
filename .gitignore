@@ -18,3 +18,6 @@ env/
 # Mac/Windows System files
 .DS_Store
 Thumbs.db
+
+CLAUDE.md 
+.env

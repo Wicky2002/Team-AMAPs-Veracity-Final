@@ -24,13 +24,40 @@ except Exception:  # pragma: no cover - optional dependency guard
     anthropic = None
     instructor = None
 
+from competitor_discovery import discover_competitor_domains_via_search
 from constants import ROUTE_END, ROUTE_LOOP_BACK, UIComponent
+from credibility import credibility_tier, domain_credibility_multiplier
 from events import LoopCompleteEvent, NodeStartedEvent, SignalFoundEvent, UIRenderEvent, WarningEvent
 from geo_context import detect_geo_context, get_geo_terms
 from intent_router import detect_intent
-from mcp_tools import TARGETS, get_last_pestel_error, scan_audience_intent, scan_pestel_trends, scrape_competitor
-from persistence import load_ab_results, load_signal_cache, save_ab_results, save_signal_cache
-from state import CycleResult, OutreachVariant, SignalReference, coerce_state, guarded_stage_transition
+from mcp_tools import (
+    TARGETS,
+    generate_variant_image_url,
+    get_last_pestel_error,
+    scan_audience_intent,
+    scan_pestel_trends,
+    scrape_competitor,
+)
+from openai_image_gen import generate_variant_image_data_uri, get_last_openai_image_error
+from mcp_adjacent_client import get_temporal_signal_via_mcp, scan_adjacent_via_mcp
+from mcp_tools.discord_channel import DiscordNotConfigured, post_variant_message
+from mcp_tools.resend_channel import ResendNotConfigured, get_email_status, send_variant_email
+from persistence import (
+    load_ab_results,
+    load_campaign_history,
+    load_signal_cache,
+    save_ab_results,
+    save_campaign_history,
+    save_signal_cache,
+)
+from state import (
+    DEFAULT_PRODUCT_NAME,
+    CycleResult,
+    OutreachVariant,
+    SignalReference,
+    coerce_state,
+    guarded_stage_transition,
+)
 
 
 class GeneratedVariant(BaseModel):
@@ -42,6 +69,24 @@ class GeneratedVariant(BaseModel):
 
 class ContentOutput(BaseModel):
     variants: list[GeneratedVariant] = Field(default_factory=list)
+
+
+class TopicAnalysis(BaseModel):
+    product_or_company_name: str = Field(
+        default="",
+        description=(
+            "The specific product, company, or brand name the query is actually about, if one is "
+            "named or clearly implied. If none is named, a short neutral description of what's being "
+            "discussed (e.g. 'a telecommunications provider in India')."
+        ),
+    )
+    competitor_domains: list[str] = Field(
+        default_factory=list,
+        description=(
+            "2-4 real, well-known direct competitor companies for this specific topic. Return their "
+            "primary website domains only (e.g. 'example.com'), no other text."
+        ),
+    )
 
 
 _anthropic_client = None
@@ -229,6 +274,7 @@ def _to_signal_card(signal: SignalReference) -> dict[str, Any]:
         "raw_quote": signal.raw_quote,
         "content": signal.content,
         "confidence": signal.confidence,
+        "credibility_tier": credibility_tier(signal.source_url),
     }
 
 
@@ -347,8 +393,12 @@ def _source_quality_score(signal: SignalReference) -> float:
         "competitor": 0.78,
         "audience": 0.72,
         "pestel": 0.74,
+        "adjacent": 0.68,
+        "temporal": 0.7,
+        "channel": 0.75,
     }
-    return base_scores.get(signal.source_type, 0.65)
+    base = base_scores.get(signal.source_type, 0.65)
+    return min(1.0, base * domain_credibility_multiplier(signal.source_url))
 
 
 def _recency_score(signal: SignalReference) -> float:
@@ -423,7 +473,7 @@ def _select_top_signals(
     selected: list[SignalReference] = []
 
     # Keep cross-source visibility so one source cannot crowd out the board.
-    for source_type in ("competitor", "audience", "pestel"):
+    for source_type in ("competitor", "audience", "pestel", "adjacent", "temporal"):
         preferred = next((sig for sig in ranked if sig.source_type == source_type and sig not in selected), None)
         if preferred is not None:
             selected.append(preferred)
@@ -441,25 +491,17 @@ def _select_top_signals(
 
 
 def _fallback_competitor_signals(message: str) -> list[SignalReference]:
-    clipped_message = (message or "AI SDR market")[:120]
+    clipped_message = (message or "this market").strip()[:120] or "this market"
+    signal_text = f"Competitors in this space tend to over-index on volume rather than measurable outcomes."
     return [
         SignalReference(
             source_type="competitor",
-            source="artisan.co",
-            source_url="https://artisan.co",
+            source="market_scan",
+            source_url=None,
             content=f"Competitor positioning hint from prompt: {clipped_message}",
-            quote="Competitors emphasize high-volume outbound; weak objection handling depth.",
-            confidence=0.82,
-            raw_quote="Competitors emphasize high-volume outbound; weak objection handling depth.",
-        ),
-        SignalReference(
-            source_type="competitor",
-            source="11x.ai",
-            source_url="https://11x.ai",
-            content="Strong email automation claims but limited cross-channel transparency.",
-            quote="Strong email automation claims but limited cross-channel transparency.",
-            confidence=0.78,
-            raw_quote="Strong email automation claims but limited cross-channel transparency.",
+            quote=signal_text,
+            confidence=0.55,
+            raw_quote=signal_text,
         ),
     ]
 
@@ -472,7 +514,7 @@ def _fallback_pestel_signals(message: str = "") -> list[SignalReference]:
             "pipeline impact over send-volume metrics."
         )
     else:
-        signal_text = "AI SDR market interest remains elevated with clear demand for measurable pipeline outcomes."
+        signal_text = "Market interest in this space remains elevated with clear demand for measurable outcomes."
 
     return [
         SignalReference(
@@ -510,6 +552,41 @@ def _fallback_audience_signals(message: str = "") -> list[SignalReference]:
     ]
 
 
+def _fallback_adjacent_signals(message: str = "") -> list[SignalReference]:
+    signal_text = (
+        "Adjacent categories (vertical-specific point tools, in-house scripts) are quietly "
+        "eating budget that would otherwise go to a dedicated platform purchase."
+    )
+    return [
+        SignalReference(
+            source_type="adjacent",
+            source="adjacent_web_scan",
+            source_url=None,
+            content=signal_text,
+            quote=signal_text,
+            confidence=0.55,
+            raw_quote=signal_text,
+        )
+    ]
+
+
+def _fallback_temporal_signal() -> SignalReference:
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    quarter = (now.month - 1) // 3 + 1
+    signal_text = f"Q{quarter} {now.year}, {now.strftime('%A')}: seasonal buying-cycle context unavailable."
+    return SignalReference(
+        source_type="temporal",
+        source="calendar_context",
+        source_url=None,
+        content=signal_text,
+        quote=signal_text,
+        confidence=0.6,
+        raw_quote=signal_text,
+    )
+
+
 def _parse_competitor_domains(raw: str) -> list[str]:
     candidates = [part.strip() for part in (raw or "").split(",")]
     cleaned = [item for item in candidates if item]
@@ -525,7 +602,43 @@ def _parse_competitor_domains(raw: str) -> list[str]:
     return deduped
 
 
-def _competitor_targets_for_topic(topic: str) -> list[str]:
+async def _infer_topic_context(message: str) -> tuple[str | None, list[str]]:
+    """One Claude call, run once per research cycle: infer the actual
+    product/company the query is about (so the UI's product-name field isn't
+    stuck on its default) and real competitor domains for that topic (so
+    research doesn't scrape an unrelated hardcoded list). Returns (None, [])
+    on any failure -- callers already have their own fallback for each half."""
+    client = _get_anthropic_client()
+    if client is None or not message.strip():
+        return None, []
+
+    prompt = f"""Analyze this query about a product, company, or market:
+
+"{message}"
+
+Identify what specific product/company/market this is actually about, and name
+2-4 real, well-known direct competitors for it.
+"""
+    try:
+        result = await client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+            response_model=TopicAnalysis,
+        )
+    except Exception:
+        return None, []
+
+    name = result.product_or_company_name.strip() or None
+    domains = [d.strip() for d in result.competitor_domains if d.strip()][:4]
+    return name, domains
+
+
+def _competitor_targets_for_topic(topic: str, discovered_domains: list[str] | None = None) -> list[str]:
+    """Resolve which domains to scrape for competitor signal. Priority order:
+    explicit geo-specific env override > explicit generic env override >
+    dynamically discovered domains for this topic > the hardcoded default
+    list (last resort, so research never comes back completely empty)."""
     geo = detect_geo_context(topic)
     if geo is not None:
         country_targets = _parse_competitor_domains(os.getenv(f"COMPETITOR_TARGETS_{geo.iso2}", ""))
@@ -542,6 +655,9 @@ def _competitor_targets_for_topic(topic: str) -> list[str]:
     if override_targets:
         return override_targets
 
+    if discovered_domains:
+        return discovered_domains
+
     return list(TARGETS)
 
 
@@ -550,19 +666,20 @@ def _fallback_variant_for_angle(
     *,
     competitor_quote: str,
     outcome_quote: str,
+    product_name: str = "This product",
 ) -> OutreachVariant:
     if angle == "roi":
         return OutreachVariant(
-            subject_line="A practical path to 3x better AI SDR reply rates",
-            hook=f"Revenue teams now care most about outcomes and attribution — {outcome_quote[:140]}",
-            cta="Want the ROI playbook we use with Series B sales teams?",
-            hypothesis="ROI framing should win with VP Sales buyers focused on predictable pipeline.",
+            subject_line=f"A practical path to better results with {product_name}",
+            hook=f"Buyers now care most about outcomes and attribution — {outcome_quote[:140]}",
+            cta="Want the ROI playbook we use with our best customers?",
+            hypothesis=f"ROI framing should win with buyers focused on predictable, measurable results from {product_name}.",
             provenance_chain=[],
         )
 
     if angle == "social_proof":
         return OutreachVariant(
-            subject_line="How peer teams are improving reply rates with AI SDRs",
+            subject_line=f"How peer teams are getting more from {product_name}",
             hook=f"Top teams respond faster to concrete proof over claims — {outcome_quote[:140]}",
             cta="Want 3 real examples we can adapt to your outreach this week?",
             hypothesis="Social proof framing should reduce skepticism by showing credible peer outcomes.",
@@ -570,10 +687,10 @@ def _fallback_variant_for_angle(
         )
 
     return OutreachVariant(
-        subject_line="The AI SDR gap most teams are still paying for",
-        hook=f"Most AI SDR tools optimize sends, not conversions — {competitor_quote[:140]}",
+        subject_line=f"The gap most {product_name} buyers are still paying for",
+        hook=f"Most tools in this space optimize the wrong thing — {competitor_quote[:140]}",
         cta="Open to a 15-minute gap analysis this week?",
-        hypothesis="Competitor gap framing will create urgency by naming an avoidable risk.",
+        hypothesis=f"Competitor gap framing will create urgency by naming an avoidable risk {product_name} solves.",
         provenance_chain=[],
     )
 
@@ -582,18 +699,26 @@ def _fallback_variants(
     top_signals: list[SignalReference],
     *,
     preferred_angle: Literal["competitor_gap", "roi", "social_proof"] | None = None,
+    product_name: str = "This product",
 ) -> list[OutreachVariant]:
-    competitor_quote = next((s.raw_quote for s in top_signals if s.source_type == "competitor"), "AI SDR tools over-index on volume")
+    competitor_quote = next(
+        (s.raw_quote for s in top_signals if s.source_type == "competitor"),
+        "Competitors in this space over-index on volume rather than outcomes",
+    )
     outcome_quote = next(
         (s.raw_quote for s in top_signals if s.source_type in {"audience", "pestel"}),
-        "Teams are prioritizing measurable pipeline outcomes",
+        "Buyers are prioritizing measurable outcomes over feature lists",
     )
 
     first_angle, second_angle = _preferred_variant_angles(preferred_angle)
 
     return [
-        _fallback_variant_for_angle(first_angle, competitor_quote=competitor_quote, outcome_quote=outcome_quote),
-        _fallback_variant_for_angle(second_angle, competitor_quote=competitor_quote, outcome_quote=outcome_quote),
+        _fallback_variant_for_angle(
+            first_angle, competitor_quote=competitor_quote, outcome_quote=outcome_quote, product_name=product_name
+        ),
+        _fallback_variant_for_angle(
+            second_angle, competitor_quote=competitor_quote, outcome_quote=outcome_quote, product_name=product_name
+        ),
     ]
 
 
@@ -634,6 +759,7 @@ def _enrich_variants(
     top_signals: list[SignalReference],
     *,
     preferred_angle: Literal["competitor_gap", "roi", "social_proof"] | None = None,
+    product_name: str = "This product",
 ) -> list[OutreachVariant]:
     defaults = (
         "Competitor gap framing will create urgency around differentiation.",
@@ -653,7 +779,7 @@ def _enrich_variants(
             )
         )
 
-    fallback_pool = _fallback_variants(top_signals, preferred_angle=preferred_angle)
+    fallback_pool = _fallback_variants(top_signals, preferred_angle=preferred_angle, product_name=product_name)
     while len(enriched) < 2:
         fallback_variant = fallback_pool[len(enriched)]
         enriched.append(
@@ -669,9 +795,9 @@ def _enrich_variants(
     return enriched
 
 
-async def _collect_competitor_signals(topic: str) -> list[SignalReference]:
+async def _collect_competitor_signals(topic: str, discovered_domains: list[str] | None = None) -> list[SignalReference]:
     signals: list[SignalReference] = []
-    for domain in _competitor_targets_for_topic(topic):
+    for domain in _competitor_targets_for_topic(topic, discovered_domains):
         cached = await load_signal_cache(domain=domain, topic=topic)
         if cached:
             signals.extend(cached)
@@ -714,6 +840,7 @@ async def _generate_variants_with_claude(
     top_signals: list[SignalReference],
     learning_brief: str | None = None,
     preferred_angle: Literal["competitor_gap", "roi", "social_proof"] | None = None,
+    product_name: str = "the product",
 ) -> list[OutreachVariant] | None:
     _set_last_claude_error(None)
     client = _get_anthropic_client()
@@ -725,14 +852,14 @@ async def _generate_variants_with_claude(
     angle_a, angle_b = _preferred_variant_angles(preferred_angle)
     history_context = learning_brief or "No prior campaign winners available yet."
 
-    prompt = f"""You are a B2B growth expert. Based on these live market signals about the AI SDR space:
+    prompt = f"""You are a B2B growth expert. Based on these live market signals about the market {product_name} competes in:
 
 {signals_text}
 
 Historical performance memory:
 {history_context}
 
-Generate 2 outreach email variants for Lilian (Vector Agents AI SDR) targeting VP Sales at Series B companies.
+Generate 2 outreach email variants for {product_name} targeting the buyers most likely to purchase it.
 
 Variant A: Lead with {_angle_prompt_name(angle_a)}
 Variant B: Lead with {_angle_prompt_name(angle_b)}
@@ -746,7 +873,7 @@ User context: {message}
 
     try:
         result = await client.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-5",
             max_tokens=2000,
             messages=[
                 {
@@ -797,6 +924,7 @@ async def _generate_variants_with_ollama(
     top_signals: list[SignalReference],
     learning_brief: str | None = None,
     preferred_angle: Literal["competitor_gap", "roi", "social_proof"] | None = None,
+    product_name: str = "the product",
 ) -> list[OutreachVariant] | None:
     _set_last_ollama_error(None)
     config = _get_ollama_config()
@@ -825,7 +953,7 @@ Historical performance memory:
 {history_context}
 
 Task:
-- Generate 2 outreach email variants for Lilian (Vector Agents AI SDR) targeting VP Sales at Series B companies.
+- Generate 2 outreach email variants for {product_name} targeting the buyers most likely to purchase it.
 - Variant A must lead with {_angle_prompt_name(angle_a)}.
 - Variant B must lead with {_angle_prompt_name(angle_b)}.
 - Keep each field concise and specific.
@@ -944,58 +1072,36 @@ async def _generate_variants_with_llm(
     top_signals: list[SignalReference],
     learning_brief: str | None = None,
     preferred_angle: Literal["competitor_gap", "roi", "social_proof"] | None = None,
+    product_name: str = "the product",
 ) -> list[OutreachVariant] | None:
     _set_last_ollama_error(None)
     _set_last_claude_error(None)
     provider = _get_llm_provider()
+    common_kwargs = {
+        "message": message,
+        "top_signals": top_signals,
+        "learning_brief": learning_brief,
+        "preferred_angle": preferred_angle,
+        "product_name": product_name,
+    }
 
     if provider == "ollama":
-        variants = await _generate_variants_with_ollama(
-            message=message,
-            top_signals=top_signals,
-            learning_brief=learning_brief,
-            preferred_angle=preferred_angle,
-        )
+        variants = await _generate_variants_with_ollama(**common_kwargs)
         if variants:
             return variants
-        return await _generate_variants_with_claude(
-            message=message,
-            top_signals=top_signals,
-            learning_brief=learning_brief,
-            preferred_angle=preferred_angle,
-        )
+        return await _generate_variants_with_claude(**common_kwargs)
 
     if provider == "anthropic":
-        variants = await _generate_variants_with_claude(
-            message=message,
-            top_signals=top_signals,
-            learning_brief=learning_brief,
-            preferred_angle=preferred_angle,
-        )
+        variants = await _generate_variants_with_claude(**common_kwargs)
         if variants:
             return variants
-        return await _generate_variants_with_ollama(
-            message=message,
-            top_signals=top_signals,
-            learning_brief=learning_brief,
-            preferred_angle=preferred_angle,
-        )
+        return await _generate_variants_with_ollama(**common_kwargs)
 
     # auto mode: prefer Anthropic if configured, then Ollama.
-    variants = await _generate_variants_with_claude(
-        message=message,
-        top_signals=top_signals,
-        learning_brief=learning_brief,
-        preferred_angle=preferred_angle,
-    )
+    variants = await _generate_variants_with_claude(**common_kwargs)
     if variants:
         return variants
-    return await _generate_variants_with_ollama(
-        message=message,
-        top_signals=top_signals,
-        learning_brief=learning_brief,
-        preferred_angle=preferred_angle,
-    )
+    return await _generate_variants_with_ollama(**common_kwargs)
 
 
 async def intent_router_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -1079,28 +1185,106 @@ def route_from_intent(state: dict[str, Any]) -> str:
     return route_map.get(stage, ROUTE_LOOP_BACK)
 
 
+async def _collect_channel_signals(thread_id: str) -> list[SignalReference]:
+    """Channel & campaign intelligence: what's working where, derived from our
+    own accumulated campaign_history rather than an external source -- this
+    category is inherently about our own historical performance, not live
+    market signal, so there's nothing to scrape and no paid call to make.
+    """
+    if not thread_id:
+        return []
+
+    history = await load_campaign_history(thread_id)
+    if not history:
+        return []
+
+    by_channel: dict[str, list[CycleResult]] = {}
+    for cycle in history:
+        if cycle.channel:
+            by_channel.setdefault(cycle.channel, []).append(cycle)
+
+    if len(by_channel) < 2:
+        return []
+
+    averages = {
+        channel: sum(c.reply_rate for c in cycles) / len(cycles) for channel, cycles in by_channel.items()
+    }
+    best_channel = max(averages, key=averages.get)
+    worst_channel = min(averages, key=averages.get)
+    if best_channel == worst_channel or averages[worst_channel] <= 0:
+        return []
+
+    lift = averages[best_channel] / averages[worst_channel]
+    total_cycles = sum(len(cycles) for cycles in by_channel.values())
+    confidence = min(0.85, 0.5 + 0.05 * total_cycles)
+
+    content = (
+        f"{best_channel} cycles average a {averages[best_channel] * 100:.1f}% reply rate "
+        f"({lift:.1f}x {worst_channel}'s {averages[worst_channel] * 100:.1f}%) across "
+        f"{len(by_channel[best_channel])} vs {len(by_channel[worst_channel])} cycles."
+    )
+    return [
+        SignalReference(
+            source_type="channel",
+            source="internal_campaign_history",
+            source_url=None,
+            content=content,
+            quote=content,
+            confidence=confidence,
+            raw_quote=content,
+        )
+    ]
+
+
 async def market_intelligence_node(state: dict[str, Any]) -> dict[str, Any]:
     state_model = coerce_state(state)
     _emit(NodeStartedEvent(type="node_started", node="market_intelligence", cycle_n=state_model.cycle_n))
 
     message = state_model.message or "AI SDR market positioning"
 
+    # Infer the real product/topic and its real competitors once per cycle, so
+    # research isn't hardcoded to one product's competitive landscape
+    # regardless of what's actually being asked. Claude first, live-search
+    # fallback for the competitor half if that's unavailable/fails -- research
+    # should never silently fall back to an unrelated domain list.
+    inferred_name, discovered_domains = await _infer_topic_context(message)
+    if not discovered_domains:
+        discovered_domains = await discover_competitor_domains_via_search(message)
+
+    product_name = state_model.product_name
+    if product_name == DEFAULT_PRODUCT_NAME and inferred_name:
+        product_name = inferred_name
+
     _emit(NodeStartedEvent(type="node_started", node="competitor_node", cycle_n=state_model.cycle_n))
     _emit(NodeStartedEvent(type="node_started", node="audience_node", cycle_n=state_model.cycle_n))
     _emit(NodeStartedEvent(type="node_started", node="pestel_node", cycle_n=state_model.cycle_n))
+    _emit(NodeStartedEvent(type="node_started", node="adjacent_node_mcp", cycle_n=state_model.cycle_n))
+    _emit(NodeStartedEvent(type="node_started", node="temporal_node_mcp", cycle_n=state_model.cycle_n))
+    _emit(NodeStartedEvent(type="node_started", node="channel_node", cycle_n=state_model.cycle_n))
+
+    async def _temporal_as_list(topic: str) -> list[SignalReference]:
+        signal = await get_temporal_signal_via_mcp()
+        return [signal] if signal else []
 
     results = await asyncio.gather(
-        _collect_competitor_signals(message),
+        _collect_competitor_signals(message, discovered_domains),
         _collect_audience_signals(message),
         _collect_pestel_signals(message),
+        scan_adjacent_via_mcp(message),
+        _temporal_as_list(message),
+        _collect_channel_signals(state_model.thread_id or ""),
         return_exceptions=True,
     )
 
     signals: list[SignalReference] = []
+    source_order = ["competitor", "audience", "pestel", "adjacent", "temporal", "channel"]
 
     for idx, result in enumerate(results):
         if isinstance(result, Exception):
-            source_name = ["competitor", "audience", "pestel"][idx]
+            source_name = source_order[idx]
+            if source_name == "channel":
+                # Not enough cross-channel history yet is normal, not a failure -- skip quietly.
+                continue
             _emit(
                 WarningEvent(
                     type="warning",
@@ -1145,6 +1329,26 @@ async def market_intelligence_node(state: dict[str, Any]) -> dict[str, Any]:
             )
         )
 
+    if not any(signal.source_type == "adjacent" for signal in signals):
+        signals.extend(_fallback_adjacent_signals(message))
+        _emit(
+            WarningEvent(
+                type="warning",
+                message="Adjacent-threat MCP scan returned no results; fallback signal used.",
+                fallback_used=True,
+            )
+        )
+
+    if not any(signal.source_type == "temporal" for signal in signals):
+        signals.append(_fallback_temporal_signal())
+        _emit(
+            WarningEvent(
+                type="warning",
+                message="Temporal-context MCP tool returned no results; fallback signal used.",
+                fallback_used=True,
+            )
+        )
+
     signals = _select_top_signals(signals, limit=12, query_context=message)
 
     for signal in signals:
@@ -1174,6 +1378,7 @@ async def market_intelligence_node(state: dict[str, Any]) -> dict[str, Any]:
         {
             "loop_stage": next_stage,
             "signals": [s.model_dump() for s in signals],
+            "product_name": product_name,
         }
     )
     return next_state
@@ -1192,10 +1397,11 @@ async def content_gen_node(state: dict[str, Any]) -> dict[str, Any]:
         top_signals=top_signals,
         learning_brief=learning_brief,
         preferred_angle=preferred_angle,
+        product_name=state_model.product_name,
     )
 
     if not variants:
-        variants = _fallback_variants(top_signals, preferred_angle=preferred_angle)
+        variants = _fallback_variants(top_signals, preferred_angle=preferred_angle, product_name=state_model.product_name)
         llm_detail = _describe_llm_failure(provider)
         warning_message = "LLM generation unavailable or failed; deterministic fallback variants used."
         if preferred_angle:
@@ -1227,24 +1433,25 @@ async def content_gen_node(state: dict[str, Any]) -> dict[str, Any]:
 def _build_comparison_card(
     signals: list[SignalReference],
     variants: list[OutreachVariant],
+    product_name: str = "This product",
 ) -> dict[str, Any]:
     """Build comparison card data from competitor signals and generated variants."""
     competitors: list[dict[str, Any]] = []
 
-    # Lilian (our product) — always first
-    lilian_strengths: list[str] = []
+    # Our product — always first
+    own_strengths: list[str] = []
     for variant in variants[:2]:
         if variant.hypothesis:
-            lilian_strengths.append(variant.hypothesis[:120])
-    if not lilian_strengths:
-        lilian_strengths = ["Signal-driven outreach", "Full-loop campaign automation"]
-    lilian_strengths = lilian_strengths[:3]
+            own_strengths.append(variant.hypothesis[:120])
+    if not own_strengths:
+        own_strengths = ["Signal-driven outreach", "Full-loop campaign automation"]
+    own_strengths = own_strengths[:3]
 
     competitors.append(
         {
-            "name": "Lilian (Vector Agents)",
-            "tagline": "Signal-driven AI SDR with closed-loop learning",
-            "strengths": lilian_strengths + ["Provenance-traced copy", "A/B hypothesis testing"],
+            "name": product_name,
+            "tagline": "Signal-driven growth with closed-loop learning",
+            "strengths": own_strengths + ["Provenance-traced copy", "A/B hypothesis testing"],
             "weaknesses": ["Newer entrant in the market"],
             "highlight": True,
         }
@@ -1409,6 +1616,7 @@ def _build_campaign_brief(
     variants: list[OutreachVariant],
     message: str,
     outreach_channel: str | None,
+    product_name: str = "This product",
 ) -> dict[str, Any]:
     audience_quote = next(
         (
@@ -1451,10 +1659,10 @@ def _build_campaign_brief(
     return {
         "title": "Campaign Positioning Brief",
         "positioning_statement": (
-            "Lilian helps revenue teams turn live buyer + competitor signals into outbound messaging "
-            "that improves reply rates through continuous feedback loops."
+            f"{product_name} helps revenue teams turn live buyer + competitor signals into outbound "
+            "messaging that improves reply rates through continuous feedback loops."
         ),
-        "target_audience": "VP Sales and revenue leaders at Series B+ B2B companies",
+        "target_audience": "The buyers most likely to purchase this product",
         "key_messages": key_messages[:3],
         "competitor_gaps": top_competitor_gaps,
         "recommended_channels": recommended_channels,
@@ -1473,8 +1681,45 @@ async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
 
     top_signals = _select_top_signals(state_model.signals, limit=5, query_context=state_model.message)
     preferred_angle = _infer_winning_angle(state_model.campaign_history)
-    source_variants = state_model.variants or _fallback_variants(top_signals, preferred_angle=preferred_angle)
-    variants = _enrich_variants(source_variants, top_signals, preferred_angle=preferred_angle)
+    source_variants = state_model.variants or _fallback_variants(
+        top_signals, preferred_angle=preferred_angle, product_name=state_model.product_name
+    )
+    variants = _enrich_variants(
+        source_variants, top_signals, preferred_angle=preferred_angle, product_name=state_model.product_name
+    )
+
+    openai_images = await asyncio.gather(
+        *[
+            generate_variant_image_data_uri(
+                angle=_to_angle(variant.hypothesis),
+                hook=variant.hook,
+                product_name=state_model.product_name,
+            )
+            for variant in variants
+        ],
+        return_exceptions=True,
+    )
+
+    any_openai_used = False
+    resolved_variants: list[OutreachVariant] = []
+    for variant, openai_result in zip(variants, openai_images):
+        image_url = openai_result if isinstance(openai_result, str) else None
+        if image_url:
+            any_openai_used = True
+        else:
+            image_url = generate_variant_image_url(
+                angle=_to_angle(variant.hypothesis),
+                hook=variant.hook,
+            )
+        resolved_variants.append(variant.model_copy(update={"image_url": image_url}))
+    variants = resolved_variants
+
+    if not any_openai_used:
+        openai_reason = get_last_openai_image_error()
+        warning_message = "OpenAI image generation unavailable; using free fallback image generator."
+        if openai_reason:
+            warning_message = f"{warning_message} Details: {openai_reason}"
+        _emit(WarningEvent(type="warning", message=warning_message, fallback_used=True))
 
     variant_payload = [v.model_dump() for v in variants]
 
@@ -1497,7 +1742,7 @@ async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
     )
 
     # Emit a downloadable comparison card from competitor signals
-    comparison_card = _build_comparison_card(state_model.signals, variants)
+    comparison_card = _build_comparison_card(state_model.signals, variants, state_model.product_name)
     _emit(
         UIRenderEvent(
             type="ui_render",
@@ -1522,6 +1767,7 @@ async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
         variants,
         state_model.message,
         state_model.outreach_channel,
+        state_model.product_name,
     )
     _emit(
         UIRenderEvent(
@@ -1544,6 +1790,45 @@ async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
     return next_state
 
 
+def _zero_metrics(count: int) -> list[dict[str, Any]]:
+    return [{"variant": i, "open_rate": 0.0, "reply_rate": 0.0, "click_rate": 0.0} for i in range(count)]
+
+
+def reaction_counts_to_metrics(counts: list[int]) -> list[dict[str, Any]]:
+    """Convert raw Discord reaction counts into the open/reply/click-rate shape
+    the rest of the loop already understands. Reaction count is the only real
+    signal Discord gives us here, so these three fields are derived from that
+    single number rather than being three independent measurements:
+      - reply_rate: each variant's share of total reactions (drives winner pick)
+      - open_rate: raw engagement, normalized against a small demo-scale ceiling
+      - click_rate: a damped composite of the two, kept mainly for the UI bars
+    """
+    total = sum(counts) or 1
+    metrics: list[dict[str, Any]] = []
+    for idx, count in enumerate(counts):
+        share = count / total
+        raw_engagement = min(count / 5, 1.0)
+        metrics.append(
+            {
+                "variant": idx,
+                "open_rate": round(raw_engagement, 3),
+                "reply_rate": round(share, 3),
+                "click_rate": round(raw_engagement * share, 3),
+            }
+        )
+    return metrics
+
+
+def _variant_post_content(variant: OutreachVariant, label: str) -> str:
+    return (
+        f"**{label}**\n"
+        f"{variant.subject_line}\n\n"
+        f"{variant.hook}\n\n"
+        f"CTA: {variant.cta}\n\n"
+        f"_React with any emoji to signal interest in this variant._"
+    )
+
+
 async def outreach_node(state: dict[str, Any]) -> dict[str, Any]:
     state_model = coerce_state(state)
     _emit(NodeStartedEvent(type="node_started", node="outreach", cycle_n=state_model.cycle_n))
@@ -1561,10 +1846,71 @@ async def outreach_node(state: dict[str, Any]) -> dict[str, Any]:
             )
         )
 
-    metrics = [
-        {"variant": 0, "open_rate": 0.44, "reply_rate": 0.11, "click_rate": 0.08},
-        {"variant": 1, "open_rate": 0.49, "reply_rate": 0.18, "click_rate": 0.1},
-    ]
+    discord_message_ids: list[str] = []
+    try:
+        for idx, variant in enumerate(state_model.variants[:2]):
+            label = f"Variant {chr(65 + idx)} — Cycle {state_model.cycle_n}"
+            posted = await post_variant_message(
+                label=label,
+                content=_variant_post_content(variant, label),
+                image_url=variant.image_url,
+            )
+            discord_message_ids.append(str(posted["id"]))
+        metrics = _zero_metrics(len(discord_message_ids))
+    except DiscordNotConfigured:
+        _emit(
+            WarningEvent(
+                type="warning",
+                message="Discord channel not configured; using simulated engagement metrics.",
+                fallback_used=True,
+            )
+        )
+        metrics = [
+            {"variant": 0, "open_rate": 0.44, "reply_rate": 0.11, "click_rate": 0.08},
+            {"variant": 1, "open_rate": 0.49, "reply_rate": 0.18, "click_rate": 0.1},
+        ]
+    except Exception as exc:
+        _emit(
+            WarningEvent(
+                type="warning",
+                message=f"Discord post failed ({str(exc)[:160]}); using simulated engagement metrics.",
+                fallback_used=True,
+            )
+        )
+        metrics = [
+            {"variant": 0, "open_rate": 0.44, "reply_rate": 0.11, "click_rate": 0.08},
+            {"variant": 1, "open_rate": 0.49, "reply_rate": 0.18, "click_rate": 0.1},
+        ]
+
+    resend_email_ids: list[str] = []
+    if selected_channel in {"Email", "Both"}:
+        try:
+            for idx, variant in enumerate(state_model.variants[:2]):
+                label = f"Variant {chr(65 + idx)} — Cycle {state_model.cycle_n}"
+                sent = await send_variant_email(
+                    label=label,
+                    subject_line=variant.subject_line,
+                    hook=variant.hook,
+                    cta=variant.cta,
+                    image_url=variant.image_url,
+                )
+                resend_email_ids.append(str(sent["id"]))
+        except ResendNotConfigured:
+            _emit(
+                WarningEvent(
+                    type="warning",
+                    message="Email channel not configured (RESEND_API_KEY/RESEND_TEST_RECIPIENT missing); skipping real send.",
+                    fallback_used=True,
+                )
+            )
+        except Exception as exc:
+            _emit(
+                WarningEvent(
+                    type="warning",
+                    message=f"Email send failed ({str(exc)[:160]}).",
+                    fallback_used=True,
+                )
+            )
 
     thread_id = state_model.thread_id or "local-thread"
     await save_ab_results(
@@ -1572,6 +1918,7 @@ async def outreach_node(state: dict[str, Any]) -> dict[str, Any]:
         cycle_n=state_model.cycle_n,
         variants=state_model.variants,
         metrics=metrics,
+        discord_message_ids=discord_message_ids,
     )
 
     _emit(
@@ -1582,6 +1929,8 @@ async def outreach_node(state: dict[str, Any]) -> dict[str, Any]:
                 "metrics": metrics,
                 "selected_channel": selected_channel,
                 "campaign_history": [entry.model_dump() for entry in state_model.campaign_history],
+                "discord_message_ids": discord_message_ids,
+                "resend_email_ids": resend_email_ids,
             },
             cycle_n=state_model.cycle_n,
         )
@@ -1596,6 +1945,8 @@ async def outreach_node(state: dict[str, Any]) -> dict[str, Any]:
             "ab_results": metrics,
             "outreach_channel": selected_channel,
             "loop_stage": next_stage,
+            "discord_message_ids": discord_message_ids,
+            "resend_email_ids": resend_email_ids,
         }
     )
     return next_state
@@ -1642,8 +1993,10 @@ async def feedback_ingestor_node(state: dict[str, Any]) -> dict[str, Any]:
             open_rate=float(feedback.open_rate or winner_metric.get("open_rate", 0.0)),
             reply_rate=float(feedback.reply_rate or winner_metric.get("reply_rate", 0.0)),
             angle=feedback.angle or _to_angle((winner_variant.hypothesis if winner_variant else "competitor_gap")),
+            channel=feedback.channel or state_model.outreach_channel,
         )
         campaign_history.append(cycle_result)
+        await save_campaign_history(thread_id=state_model.thread_id or "local-thread", cycle_result=cycle_result)
 
         completed_cycle_n = state_model.cycle_n
         next_cycle_n = state_model.cycle_n + 1

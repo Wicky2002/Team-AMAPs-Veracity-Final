@@ -69,7 +69,19 @@ def sample_signals() -> dict[str, list[SignalReference]]:
         "competitor": [_make_signal("competitor", "artisan.co", "Competitor over-indexes on send volume", 0.91)],
         "audience": [_make_signal("audience", "reddit/r/sales", "Need less fluff and more relevance", 0.86)],
         "pestel": [_make_signal("pestel", "google_trends", "AI SDR intent remains elevated", 0.72)],
+        "adjacent": [_make_signal("adjacent", "adjacent_web_scan", "Point tools are eating budget", 0.6)],
     }
+
+
+def _patch_mcp_collectors(sample_signals: dict[str, list[SignalReference]]):
+    """MCP-backed collectors (adjacent/temporal) spawn a real subprocess and hit
+    the network -- mock them in unit tests the same way the other three
+    collectors are mocked, so these stay fast and deterministic."""
+    temporal_signal = _make_signal("temporal", "calendar_context", "Q1 2026, Monday: planning season", 0.8)
+    return (
+        patch.object(graph_nodes, "scan_adjacent_via_mcp", AsyncMock(return_value=sample_signals["adjacent"])),
+        patch.object(graph_nodes, "get_temporal_signal_via_mcp", AsyncMock(return_value=temporal_signal)),
+    )
 
 
 class TestParallelResearchNodes:
@@ -86,10 +98,11 @@ class TestParallelResearchNodes:
         competitor_mock = AsyncMock(return_value=sample_signals["competitor"])
         audience_mock = AsyncMock(return_value=sample_signals["audience"])
         pestel_mock = AsyncMock(return_value=sample_signals["pestel"])
+        adjacent_patch, temporal_patch = _patch_mcp_collectors(sample_signals)
 
         with patch.object(graph_nodes, "_collect_competitor_signals", competitor_mock), patch.object(
             graph_nodes, "_collect_audience_signals", audience_mock
-        ), patch.object(graph_nodes, "_collect_pestel_signals", pestel_mock):
+        ), patch.object(graph_nodes, "_collect_pestel_signals", pestel_mock), adjacent_patch, temporal_patch:
             updated = await market_intelligence_node(base_state)
 
         assert competitor_mock.await_count == 1
@@ -106,9 +119,10 @@ class TestParallelResearchNodes:
         base_state: dict[str, Any],
         sample_signals: dict[str, list[SignalReference]],
     ):
+        adjacent_patch, temporal_patch = _patch_mcp_collectors(sample_signals)
         with patch.object(graph_nodes, "_collect_competitor_signals", AsyncMock(return_value=sample_signals["competitor"])), patch.object(
             graph_nodes, "_collect_audience_signals", AsyncMock(return_value=sample_signals["audience"])
-        ), patch.object(graph_nodes, "_collect_pestel_signals", AsyncMock(return_value=sample_signals["pestel"])):
+        ), patch.object(graph_nodes, "_collect_pestel_signals", AsyncMock(return_value=sample_signals["pestel"])), adjacent_patch, temporal_patch:
             updated = await market_intelligence_node(base_state)
 
         confidence_scores = updated.get("confidence_scores")
@@ -129,9 +143,10 @@ class TestParallelResearchNodes:
         base_state: dict[str, Any],
         sample_signals: dict[str, list[SignalReference]],
     ):
+        adjacent_patch, temporal_patch = _patch_mcp_collectors(sample_signals)
         with patch.object(graph_nodes, "_collect_competitor_signals", AsyncMock(return_value=sample_signals["competitor"])), patch.object(
             graph_nodes, "_collect_audience_signals", AsyncMock(return_value=sample_signals["audience"])
-        ), patch.object(graph_nodes, "_collect_pestel_signals", AsyncMock(return_value=sample_signals["pestel"])):
+        ), patch.object(graph_nodes, "_collect_pestel_signals", AsyncMock(return_value=sample_signals["pestel"])), adjacent_patch, temporal_patch:
             updated = await market_intelligence_node(base_state)
 
         assert updated["loop_stage"] == "generate"
@@ -146,11 +161,12 @@ class TestParallelResearchNodes:
         emitted: list[dict[str, Any]] = []
         monkeypatch.setattr(graph_nodes, "get_stream_writer", lambda: emitted.append)
 
+        adjacent_patch, temporal_patch = _patch_mcp_collectors(sample_signals)
         with patch.object(graph_nodes, "_collect_competitor_signals", AsyncMock(side_effect=Exception("boom"))), patch.object(
             graph_nodes, "_collect_audience_signals", AsyncMock(return_value=sample_signals["audience"])
         ), patch.object(graph_nodes, "_collect_pestel_signals", AsyncMock(return_value=sample_signals["pestel"])), patch.object(
             graph_nodes, "_fallback_competitor_signals", return_value=[]
-        ):
+        ), adjacent_patch, temporal_patch:
             updated = await market_intelligence_node(base_state)
 
         typed = coerce_state(updated)
@@ -171,20 +187,28 @@ class TestParallelResearchNodes:
         emitted: list[dict[str, Any]] = []
         monkeypatch.setattr(graph_nodes, "get_stream_writer", lambda: emitted.append)
 
+        # adjacent/temporal MCP calls are also mocked to fail/empty here, so this
+        # test still isolates "all five sources failed" -- their fallbacks are
+        # pure local functions (no I/O) so they're left to run for real.
         with patch.object(graph_nodes, "_collect_competitor_signals", AsyncMock(side_effect=Exception("c"))), patch.object(
             graph_nodes, "_collect_audience_signals", AsyncMock(side_effect=Exception("a"))
         ), patch.object(graph_nodes, "_collect_pestel_signals", AsyncMock(side_effect=Exception("p"))), patch.object(
             graph_nodes, "_fallback_competitor_signals", return_value=[]
         ), patch.object(graph_nodes, "_fallback_audience_signals", return_value=[]), patch.object(
             graph_nodes, "_fallback_pestel_signals", return_value=[]
-        ):
+        ), patch.object(graph_nodes, "scan_adjacent_via_mcp", AsyncMock(return_value=[])), patch.object(
+            graph_nodes, "get_temporal_signal_via_mcp", AsyncMock(return_value=None)
+        ), patch.object(graph_nodes, "_fallback_adjacent_signals", return_value=[]):
             updated = await market_intelligence_node(base_state)
 
         stale = _extract_stale_signals(updated, emitted)
 
         assert updated["loop_stage"] == "generate"
         assert len(set(stale)) == 3
-        assert updated.get("signals") == []
+        # Only the local, no-I/O temporal fallback survives -- competitor/audience/
+        # pestel all failed, and adjacent's fallback was forced empty above.
+        source_types = {sig["source_type"] for sig in updated.get("signals", [])}
+        assert source_types == {"temporal"}
 
     @pytest.mark.asyncio
     async def test_one_of_three_failures_collects_remaining_two_and_marks_one_stale(
@@ -196,17 +220,19 @@ class TestParallelResearchNodes:
         emitted: list[dict[str, Any]] = []
         monkeypatch.setattr(graph_nodes, "get_stream_writer", lambda: emitted.append)
 
+        adjacent_patch, temporal_patch = _patch_mcp_collectors(sample_signals)
         with patch.object(graph_nodes, "_collect_competitor_signals", AsyncMock(side_effect=Exception("c"))), patch.object(
             graph_nodes, "_collect_audience_signals", AsyncMock(return_value=sample_signals["audience"])
         ), patch.object(graph_nodes, "_collect_pestel_signals", AsyncMock(return_value=sample_signals["pestel"])), patch.object(
             graph_nodes, "_fallback_competitor_signals", return_value=[]
-        ):
+        ), adjacent_patch, temporal_patch:
             updated = await market_intelligence_node(base_state)
 
         stale = _extract_stale_signals(updated, emitted)
         typed = coerce_state(updated)
 
-        assert len(typed.signals) == 2
+        # audience + pestel (mocked) + adjacent + temporal (mocked MCP sources)
+        assert len(typed.signals) == 4
         assert len(set(stale)) == 1
 
     @pytest.mark.asyncio
@@ -226,9 +252,10 @@ class TestParallelResearchNodes:
         audience = [_make_signal("audience", "reddit/r/srilanka", "Sri Lankan buyers need practical ROI", 0.62)]
         pestel = [_make_signal("pestel", "google_trends", "Sri Lanka demand remains cost-sensitive", 0.58)]
 
+        adjacent_patch, temporal_patch = _patch_mcp_collectors({"adjacent": []})
         with patch.object(graph_nodes, "_collect_competitor_signals", AsyncMock(return_value=heavy_competitor_signals)), patch.object(
             graph_nodes, "_collect_audience_signals", AsyncMock(return_value=audience)
-        ), patch.object(graph_nodes, "_collect_pestel_signals", AsyncMock(return_value=pestel)):
+        ), patch.object(graph_nodes, "_collect_pestel_signals", AsyncMock(return_value=pestel)), adjacent_patch, temporal_patch:
             updated = await market_intelligence_node(base_state)
 
         typed = coerce_state(updated)
