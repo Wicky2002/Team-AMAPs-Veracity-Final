@@ -165,11 +165,13 @@ async def inject_action(body: LoopActionRequest):
         update_state["outreach_channel"] = body.payload.get("channel", "LinkedIn")
         update_state["loop_stage"] = "outreach"
         update_state["route_hint"] = "outreach"
+        update_state["outreach_requested"] = True
     elif body.action_type == "deploy_variant":
         if isinstance(body.payload.get("variant"), dict):
             update_state["selected_variant"] = body.payload.get("variant")
         update_state["loop_stage"] = "outreach"
         update_state["route_hint"] = "outreach"
+        update_state["outreach_requested"] = True
 
     events: list[dict[str, Any]] = []
     try:
@@ -441,7 +443,12 @@ async def refresh_email_status(body: RefreshEmailStatusRequest):
         type="ui_render",
         component=UIComponent.FEEDBACK_PANEL,
         props={
-            "metrics": current_state.get("ab_results") or [],
+            # No "metrics" key here on purpose: reaction metrics are only
+            # ever freshly known via refresh_engagement's live Discord poll,
+            # and the checkpoint's ab_results isn't kept in sync with that
+            # (see refresh_engagement's comment) -- including a stale copy
+            # here would clobber whatever the frontend already has whenever
+            # this endpoint is refreshed after refresh_engagement.
             "campaign_history": current_state.get("campaign_history") or [],
             "discord_message_ids": current_state.get("discord_message_ids") or [],
             "resend_email_ids": email_ids,

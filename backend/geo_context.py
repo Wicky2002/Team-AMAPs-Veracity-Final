@@ -119,13 +119,6 @@ def build_topic_query_variants(topic: str, max_queries: int = 6) -> list[str]:
         if geo.country_name.lower() not in normalized_lower:
             variants.append(f"{normalized} {geo.country_name}")
 
-        variants.extend(
-            [
-                f"AI SDR {geo.country_name}",
-                f"B2B sales {geo.country_name}",
-            ]
-        )
-
         for city in geo.city_hints[:2]:
             variants.append(f"{normalized} {city}")
 

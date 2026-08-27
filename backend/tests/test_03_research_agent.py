@@ -263,15 +263,15 @@ class TestParallelResearchNodes:
         assert "audience" in source_types
         assert "pestel" in source_types
 
-    def test_sri_lanka_fallback_signals_include_location_context(self):
-        audience_signals = graph_nodes._fallback_audience_signals("For the Sri Lankan market, how should we position?")
-        pestel_signals = graph_nodes._fallback_pestel_signals("For the Sri Lankan market, how should we position?")
-
-        audience_text = " ".join(f"{sig.content} {sig.quote}" for sig in audience_signals).lower()
-        pestel_text = " ".join(f"{sig.content} {sig.quote}" for sig in pestel_signals).lower()
-
-        assert "sri lanka" in audience_text
-        assert "sri lanka" in pestel_text
+    def test_fallback_signals_never_fabricate_content(self):
+        """Fallback signal functions must return nothing rather than invent a
+        plausible-sounding but made-up market claim -- callers surface a
+        warning instead (see market_intelligence_node)."""
+        message = "For the Sri Lankan market, how should we position?"
+        assert graph_nodes._fallback_competitor_signals(message) == []
+        assert graph_nodes._fallback_audience_signals(message) == []
+        assert graph_nodes._fallback_pestel_signals(message) == []
+        assert graph_nodes._fallback_adjacent_signals(message) == []
 
     def test_competitor_targets_prefer_sri_lanka_override_when_geo_context_present(
         self,

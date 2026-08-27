@@ -75,6 +75,24 @@ class CycleResult(BaseModel):
     timestamp: str = Field(default_factory=_utc_now_iso)
 
 
+class LinkedInPostCopy(BaseModel):
+    angle: Literal["competitor_gap", "roi_outcome", "thought_leader"]
+    hook: str = ""
+    hashtags: list[str] = Field(default_factory=list)
+
+
+class ContentPack(BaseModel):
+    """LLM-generated copy for the comparison card / LinkedIn grid / campaign
+    brief, produced once per cycle alongside the outreach variants -- so
+    those UI components render product-specific text instead of a fixed
+    template written for one demo product."""
+
+    comparison_card_title: str = ""
+    linkedin_posts: list[LinkedInPostCopy] = Field(default_factory=list)
+    campaign_target_audience: str = ""
+    campaign_next_actions: list[str] = Field(default_factory=list)
+
+
 DEFAULT_PRODUCT_NAME = "Lilian (Vector Agents AI SDR)"
 
 
@@ -93,6 +111,19 @@ class AgentState(BaseModel):
     outreach_channel: str | None = None
     discord_message_ids: list[str] = Field(default_factory=list)
     resend_email_ids: list[str] = Field(default_factory=list)
+    # True only for the single outreach_node run triggered by an explicit
+    # user click (channel_select / deploy_variant). Keeps automatic cycle
+    # transitions (e.g. after feedback loops back into a new research cycle)
+    # from silently re-posting to Discord / re-sending emails on their own --
+    # sends should only ever happen when the user asks for them, both for
+    # predictable UX and to stay well under the email provider's daily quota.
+    outreach_requested: bool = False
+    # LLM-inferred business-model category for the current product/message
+    # (see graph_nodes.TopicAnalysis / _PERSONA_BY_CATEGORY) -- drives which
+    # marketing persona/tone content generation uses, instead of always
+    # assuming a B2B SaaS product. None until the first research cycle infers it.
+    product_category: str | None = None
+    content_pack: ContentPack | None = None
 
     @model_validator(mode="after")
     def stage_guards(self):

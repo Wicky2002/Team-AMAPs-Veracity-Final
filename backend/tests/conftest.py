@@ -52,7 +52,7 @@ def _never_write_to_real_database():
 
 @pytest.fixture(autouse=True)
 def _never_call_real_topic_inference():
-    with patch.object(graph_nodes, "_infer_topic_context", AsyncMock(return_value=(None, []))), patch.object(
+    with patch.object(graph_nodes, "_infer_topic_context", AsyncMock(return_value=(None, [], None))), patch.object(
         graph_nodes, "discover_competitor_domains_via_search", AsyncMock(return_value=[])
     ):
         yield

@@ -303,6 +303,14 @@ export default function Home() {
   const [events, setEvents] = useState<SSEEvent[]>([]);
   const [rawEvents, setRawEvents] = useState<string[]>([]);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
+  // Reaction metrics and email delivery status are refreshed independently
+  // (separate buttons/backend calls) -- merge each FeedbackPanel update onto
+  // this instead of replacing it wholesale, so refreshing one doesn't blank
+  // out whatever was already known about the other.
+  const [feedbackData, setFeedbackData] = useState<{ metrics: FeedbackMetric[]; emailStatuses: EmailStatus[] }>({
+    metrics: [],
+    emailStatuses: [],
+  });
   const [status, setStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
   const [threadId, setThreadId] = useState('');
   const [starting, setStarting] = useState(false);
@@ -358,6 +366,13 @@ export default function Home() {
       if (nextTimeline.length > 0) {
         setTimeline(nextTimeline);
       }
+
+      const newMetrics = toMetrics(parsed.props);
+      const newEmailStatuses = toEmailStatuses(parsed.props);
+      setFeedbackData((prev) => ({
+        metrics: newMetrics.length > 0 ? newMetrics : prev.metrics,
+        emailStatuses: newEmailStatuses.length > 0 ? newEmailStatuses : prev.emailStatuses,
+      }));
     }
 
     if (parsed.type === 'loop_complete' && parsed.next_action !== 'refined_research') {
@@ -371,6 +386,7 @@ export default function Home() {
     setEvents([]);
     setRawEvents([]);
     setTimeline([]);
+    setFeedbackData({ metrics: [], emailStatuses: [] });
 
     const activeThreadId = resolveThreadId();
 
@@ -429,6 +445,7 @@ export default function Home() {
     setEvents([]);
     setRawEvents([]);
     setTimeline([]);
+    setFeedbackData({ metrics: [], emailStatuses: [] });
     setStatus('idle');
     setJustCleared(true);
     setTimeout(() => setJustCleared(false), 1500);
@@ -730,8 +747,8 @@ export default function Home() {
           return (
             <FeedbackPanel
               key={`ui-feedback-${index}`}
-              metrics={toMetrics(event.props)}
-              emailStatuses={toEmailStatuses(event.props)}
+              metrics={feedbackData.metrics}
+              emailStatuses={feedbackData.emailStatuses}
               onRefresh={async () => {
                 showNotice('Refreshing reactions…');
                 await refreshEngagement();
@@ -743,7 +760,7 @@ export default function Home() {
                 showNotice('Email status refreshed.');
               }}
               onFeedback={async () => {
-                const metrics = toMetrics(event.props);
+                const metrics = feedbackData.metrics;
                 const winner = metrics.length > 0 ? metrics.reduce((a, b) => (a.reply_rate > b.reply_rate ? a : b)) : null;
                 const winnerLabel = winner ? `Variant ${String.fromCharCode(65 + winner.variant)}` : 'Variant A';
                 showNotice('Feedback sent — starting next research cycle…');

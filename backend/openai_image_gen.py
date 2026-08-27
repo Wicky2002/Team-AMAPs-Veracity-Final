@@ -16,12 +16,15 @@ try:
 except Exception:  # pragma: no cover - optional dependency guard
     AsyncOpenAI = None
 
-_STYLE_SUFFIX = (
+_DEFAULT_STYLE_SUFFIX = (
     "Professional B2B SaaS product advertisement photography: a clean modern "
     "analytics dashboard displayed on a laptop or phone screen, studio lighting, "
     "vibrant brand accent colors, high production value social media ad campaign "
-    "visual. Absolutely no readable text, no words, no letters, no numbers, no "
-    "logos anywhere in the image -- treat any on-screen UI as blurred/abstracted "
+    "visual."
+)
+_NO_TEXT_SUFFIX = (
+    "Absolutely no readable text, no words, no letters, no numbers, no logos "
+    "anywhere in the image -- treat any on-screen elements as blurred/abstracted "
     "shapes and color blocks only, never legible characters."
 )
 
@@ -67,7 +70,9 @@ def _quality() -> str:
     return os.getenv("OPENAI_IMAGE_QUALITY", "low").strip() or "low"
 
 
-async def generate_variant_image_data_uri(*, angle: str, hook: str, product_name: str) -> str | None:
+async def generate_variant_image_data_uri(
+    *, angle: str, hook: str, product_name: str, style_suffix: str | None = None
+) -> str | None:
     client = _get_client()
     if client is None:
         _set_last_error("OPENAI_API_KEY is not set or openai package unavailable")
@@ -75,7 +80,8 @@ async def generate_variant_image_data_uri(*, angle: str, hook: str, product_name
 
     angle_label = (angle or "campaign").replace("_", " ")
     clipped_hook = (hook or "").strip()[:160]
-    prompt = f"{angle_label} concept for {product_name}: {clipped_hook}. {_STYLE_SUFFIX}"
+    style = style_suffix or _DEFAULT_STYLE_SUFFIX
+    prompt = f"{angle_label} concept for {product_name}: {clipped_hook}. {style} {_NO_TEXT_SUFFIX}"
 
     try:
         response = await client.images.generate(

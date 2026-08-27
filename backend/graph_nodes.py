@@ -31,7 +31,6 @@ from events import LoopCompleteEvent, NodeStartedEvent, SignalFoundEvent, UIRend
 from geo_context import detect_geo_context, get_geo_terms
 from intent_router import detect_intent
 from mcp_tools import (
-    TARGETS,
     generate_variant_image_url,
     get_last_pestel_error,
     scan_audience_intent,
@@ -52,7 +51,9 @@ from persistence import (
 )
 from state import (
     DEFAULT_PRODUCT_NAME,
+    ContentPack,
     CycleResult,
+    LinkedInPostCopy,
     OutreachVariant,
     SignalReference,
     coerce_state,
@@ -69,6 +70,33 @@ class GeneratedVariant(BaseModel):
 
 class ContentOutput(BaseModel):
     variants: list[GeneratedVariant] = Field(default_factory=list)
+    comparison_card_title: str = Field(
+        default="",
+        description=(
+            "A short title for the competitive-landscape comparison card, naming the actual "
+            "product category (e.g. 'Sri Lankan Biscuit Brands Comparison'), not a generic phrase."
+        ),
+    )
+    linkedin_posts: list[LinkedInPostCopy] = Field(
+        default_factory=list,
+        description=(
+            "Exactly 3 LinkedIn post hooks with hashtags, one per angle: 'competitor_gap', "
+            "'roi_outcome', 'thought_leader'. Hook is one sentence grounded in the real product/"
+            "signals. Hashtags (3-4 per post) must be specific to this product's actual category "
+            "and audience, not generic sales/tech hashtags."
+        ),
+    )
+    campaign_target_audience: str = Field(
+        default="",
+        description="One sentence describing who actually buys/uses this specific product.",
+    )
+    campaign_next_actions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "3 concrete next actions appropriate to this product's actual marketing channels and "
+            "category (not necessarily cold email/outbound -- could be retail, social, local promotion, etc)."
+        ),
+    )
 
 
 class TopicAnalysis(BaseModel):
@@ -87,6 +115,31 @@ class TopicAnalysis(BaseModel):
             "primary website domains only (e.g. 'example.com'), no other text."
         ),
     )
+    product_category: Literal[
+        "b2b_saas_tech",
+        "consumer_fmcg",
+        "local_retail_or_food_service",
+        "professional_services_or_agency",
+        "other_or_unclear",
+    ] = Field(
+        default="other_or_unclear",
+        description=(
+            "The business-model category this product/company actually belongs to. Use "
+            "b2b_saas_tech ONLY for genuine B2B software/SaaS sold to sales/marketing/ops teams. "
+            "Use consumer_fmcg for packaged consumer goods (food, beverages, household products). "
+            "Use local_retail_or_food_service for brick-and-mortar retail, restaurants, or "
+            "hospitality. Use professional_services_or_agency for consulting/agency/service "
+            "businesses. Use other_or_unclear only if genuinely ambiguous."
+        ),
+    )
+    content_style_note: str = Field(
+        default="",
+        description=(
+            "One short sentence on the tone/register that would suit marketing content for this "
+            "specific product (e.g. 'cold B2B outreach email register' vs. 'consumer social/"
+            "retail-promotion register')."
+        ),
+    )
 
 
 _anthropic_client = None
@@ -95,6 +148,86 @@ _last_ollama_error: str | None = None
 _last_claude_error: str | None = None
 _ollama_chat_llm = None
 _ollama_chat_llm_config: tuple[str, str] | None = None
+_last_generated_content_pack: ContentPack | None = None
+
+# category -> (persona_line, style_hint). b2b_saas_tech intentionally
+# reproduces the tool's original hardcoded persona verbatim, so the demo
+# product's output is unchanged; every other category (and any failed/
+# unclear classification, which maps to other_or_unclear) gets a genuinely
+# different, product-appropriate register instead of always defaulting to
+# B2B/cold-outreach framing.
+_PERSONA_BY_CATEGORY: dict[str, tuple[str, str]] = {
+    "b2b_saas_tech": (
+        "You are a B2B growth expert.",
+        "cold-outreach email register, ROI/pipeline framing",
+    ),
+    "consumer_fmcg": (
+        "You are a consumer brand marketing strategist specializing in FMCG and retail growth.",
+        "consumer/retail-promotion register: shelf appeal, price-value, distribution, local retail channels",
+    ),
+    "local_retail_or_food_service": (
+        "You are a local retail and hospitality marketing strategist.",
+        "consumer-facing local-promotion register: foot traffic, seasonal offers, community/local-channel tone",
+    ),
+    "professional_services_or_agency": (
+        "You are a B2B services growth marketer.",
+        "relationship/referral-driven B2B register, credibility and case-study framing",
+    ),
+    "other_or_unclear": (
+        "You are an expert growth marketing strategist for this product's category.",
+        "a tone appropriate to the product described in the user context, inferred from the live signals",
+    ),
+}
+
+
+def _persona_for_category(category: str | None) -> tuple[str, str]:
+    return _PERSONA_BY_CATEGORY.get(category or "other_or_unclear", _PERSONA_BY_CATEGORY["other_or_unclear"])
+
+
+# Same problem as the text persona, one level down: the image-generation
+# style suffix was hardcoded to "a laptop/phone screen showing a dashboard
+# mockup" for every single generated image, regardless of product -- so a
+# biscuit brand's outreach visual came back looking like SaaS UI screenshots.
+_IMAGE_STYLE_BY_CATEGORY: dict[str, str] = {
+    "b2b_saas_tech": (
+        "Professional B2B SaaS product advertisement photography: a clean modern "
+        "analytics dashboard displayed on a laptop or phone screen, studio lighting, "
+        "vibrant brand accent colors, high production value social media ad campaign visual."
+    ),
+    "consumer_fmcg": (
+        "Professional consumer packaged-goods product photography: the physical product "
+        "attractively lit on a clean background or in an appetizing lifestyle setting, "
+        "vibrant natural colors, high production value advertisement visual."
+    ),
+    "local_retail_or_food_service": (
+        "Professional local retail/hospitality lifestyle photography: an inviting "
+        "in-store, storefront, or dining scene with warm natural lighting, high "
+        "production value local advertisement visual."
+    ),
+    "professional_services_or_agency": (
+        "Professional corporate services photography: a clean, credible business/"
+        "consulting scene (office, meeting, or handshake), polished neutral-toned "
+        "advertisement visual."
+    ),
+    "other_or_unclear": (
+        "Professional marketing product photography appropriate to the described "
+        "product, clean composition, studio lighting, high production value "
+        "advertisement visual."
+    ),
+}
+
+
+def _image_style_for_category(category: str | None) -> str:
+    return _IMAGE_STYLE_BY_CATEGORY.get(category or "other_or_unclear", _IMAGE_STYLE_BY_CATEGORY["other_or_unclear"])
+
+
+def _set_last_content_pack(pack: ContentPack | None) -> None:
+    global _last_generated_content_pack
+    _last_generated_content_pack = pack
+
+
+def get_last_generated_content_pack() -> ContentPack | None:
+    return _last_generated_content_pack
 
 
 def _get_anthropic_client():
@@ -205,6 +338,26 @@ def _loads_json_object(raw: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("LLM JSON response is not an object")
     return payload
+
+
+def _content_pack_from_structured(structured: ContentOutput) -> ContentPack | None:
+    """Extract the LLM-generated comparison-card/LinkedIn/campaign-brief copy
+    from a validated ContentOutput. Returns None if the LLM didn't actually
+    fill any of it in (older/degraded responses), so callers fall back to
+    the builder functions' own generic (non-AI-SDR) defaults."""
+    if not (
+        structured.comparison_card_title
+        or structured.linkedin_posts
+        or structured.campaign_target_audience
+        or structured.campaign_next_actions
+    ):
+        return None
+    return ContentPack(
+        comparison_card_title=structured.comparison_card_title.strip(),
+        linkedin_posts=structured.linkedin_posts,
+        campaign_target_audience=structured.campaign_target_audience.strip(),
+        campaign_next_actions=[a.strip() for a in structured.campaign_next_actions if a.strip()],
+    )
 
 
 def _variants_from_structured_output(structured: ContentOutput) -> list[OutreachVariant]:
@@ -491,83 +644,23 @@ def _select_top_signals(
 
 
 def _fallback_competitor_signals(message: str) -> list[SignalReference]:
-    clipped_message = (message or "this market").strip()[:120] or "this market"
-    signal_text = f"Competitors in this space tend to over-index on volume rather than measurable outcomes."
-    return [
-        SignalReference(
-            source_type="competitor",
-            source="market_scan",
-            source_url=None,
-            content=f"Competitor positioning hint from prompt: {clipped_message}",
-            quote=signal_text,
-            confidence=0.55,
-            raw_quote=signal_text,
-        ),
-    ]
+    # No fabricated market claim here on purpose: if live competitor
+    # discovery/scraping found nothing, the honest result is "no competitor
+    # signal this cycle" -- the caller emits a visible warning instead of
+    # this function inventing a plausible-sounding but made-up sentence.
+    return []
 
 
 def _fallback_pestel_signals(message: str = "") -> list[SignalReference]:
-    geo = detect_geo_context(message)
-    if geo is not None:
-        signal_text = (
-            f"{geo.country_name} GTM teams are cost-sensitive and increasingly prioritize measurable "
-            "pipeline impact over send-volume metrics."
-        )
-    else:
-        signal_text = "Market interest in this space remains elevated with clear demand for measurable outcomes."
-
-    return [
-        SignalReference(
-            source_type="pestel",
-            source="google_trends",
-            source_url="https://trends.google.com/",
-            content=signal_text,
-            quote=signal_text,
-            confidence=0.71,
-            raw_quote=signal_text,
-        )
-    ]
+    return []
 
 
 def _fallback_audience_signals(message: str = "") -> list[SignalReference]:
-    geo = detect_geo_context(message)
-    if geo is not None:
-        signal_text = (
-            f"{geo.country_name} B2B sellers ask for practical, budget-aware personalization "
-            "that improves reply quality."
-        )
-    else:
-        signal_text = "Leaders are tired of generic personalization and fake context."
-
-    return [
-        SignalReference(
-            source_type="audience",
-            source="reddit/r/sales",
-            source_url="https://reddit.com/r/sales",
-            content=signal_text,
-            quote=signal_text,
-            confidence=0.87,
-            raw_quote=signal_text,
-        )
-    ]
+    return []
 
 
 def _fallback_adjacent_signals(message: str = "") -> list[SignalReference]:
-    signal_text = (
-        "Adjacent categories (vertical-specific point tools, in-house scripts) are quietly "
-        "eating budget that would otherwise go to a dedicated platform purchase."
-    )
-    return [
-        SignalReference(
-            source_type="adjacent",
-            source="adjacent_web_scan",
-            source_url=None,
-            content=signal_text,
-            quote=signal_text,
-            confidence=0.55,
-            raw_quote=signal_text,
-        )
-    ]
+    return []
 
 
 def _fallback_temporal_signal() -> SignalReference:
@@ -602,22 +695,25 @@ def _parse_competitor_domains(raw: str) -> list[str]:
     return deduped
 
 
-async def _infer_topic_context(message: str) -> tuple[str | None, list[str]]:
+async def _infer_topic_context(message: str) -> tuple[str | None, list[str], TopicAnalysis | None]:
     """One Claude call, run once per research cycle: infer the actual
     product/company the query is about (so the UI's product-name field isn't
-    stuck on its default) and real competitor domains for that topic (so
-    research doesn't scrape an unrelated hardcoded list). Returns (None, [])
-    on any failure -- callers already have their own fallback for each half."""
+    stuck on its default), real competitor domains for that topic (so
+    research doesn't scrape an unrelated hardcoded list), and the product's
+    business-model category (so content generation doesn't default to a
+    B2B-SaaS persona/tone for every product). Returns (None, [], None) on
+    any failure -- callers already have their own fallback for each part."""
     client = _get_anthropic_client()
     if client is None or not message.strip():
-        return None, []
+        return None, [], None
 
     prompt = f"""Analyze this query about a product, company, or market:
 
 "{message}"
 
-Identify what specific product/company/market this is actually about, and name
-2-4 real, well-known direct competitors for it.
+Identify what specific product/company/market this is actually about, name
+2-4 real, well-known direct competitors for it, and classify its business-model
+category and the marketing content style/tone that would actually suit it.
 """
     try:
         result = await client.messages.create(
@@ -627,11 +723,11 @@ Identify what specific product/company/market this is actually about, and name
             response_model=TopicAnalysis,
         )
     except Exception:
-        return None, []
+        return None, [], None
 
     name = result.product_or_company_name.strip() or None
     domains = [d.strip() for d in result.competitor_domains if d.strip()][:4]
-    return name, domains
+    return name, domains, result
 
 
 def _competitor_targets_for_topic(topic: str, discovered_domains: list[str] | None = None) -> list[str]:
@@ -658,7 +754,11 @@ def _competitor_targets_for_topic(topic: str, discovered_domains: list[str] | No
     if discovered_domains:
         return discovered_domains
 
-    return list(TARGETS)
+    # No hardcoded last-resort list here on purpose: falling back to a fixed
+    # set of unrelated companies (the tool's original demo competitors) would
+    # silently misrepresent the market for any other product. Callers treat
+    # an empty result as "no competitor signal this cycle" and warn instead.
+    return []
 
 
 def _fallback_variant_for_angle(
@@ -810,13 +910,13 @@ async def _collect_competitor_signals(topic: str, discovered_domains: list[str] 
     return signals
 
 
-async def _collect_audience_signals(topic: str) -> list[SignalReference]:
+async def _collect_audience_signals(topic: str, product_category: str | None = None) -> list[SignalReference]:
     cache_key = "reddit_audience"
     cached = await load_signal_cache(domain=cache_key, topic=topic)
     if cached:
         return cached
 
-    scanned = await scan_audience_intent(topic)
+    scanned = await scan_audience_intent(topic, product_category=product_category)
     if scanned:
         await save_signal_cache(domain=cache_key, topic=topic, signals=scanned)
     return scanned
@@ -841,6 +941,8 @@ async def _generate_variants_with_claude(
     learning_brief: str | None = None,
     preferred_angle: Literal["competitor_gap", "roi", "social_proof"] | None = None,
     product_name: str = "the product",
+    persona_line: str = "You are a B2B growth expert.",
+    style_hint: str = "cold-outreach email register, ROI/pipeline framing",
 ) -> list[OutreachVariant] | None:
     _set_last_claude_error(None)
     client = _get_anthropic_client()
@@ -852,7 +954,7 @@ async def _generate_variants_with_claude(
     angle_a, angle_b = _preferred_variant_angles(preferred_angle)
     history_context = learning_brief or "No prior campaign winners available yet."
 
-    prompt = f"""You are a B2B growth expert. Based on these live market signals about the market {product_name} competes in:
+    prompt = f"""{persona_line} Write in {style_hint}. Based on these live market signals about the market {product_name} competes in:
 
 {signals_text}
 
@@ -868,6 +970,13 @@ If historical memory indicates a winning angle, bias your framing toward it unle
 
 Each variant must include: subject_line, hook (first sentence), cta, hypothesis.
 Keep each field concise and specific.
+
+Also produce, all grounded in the real product/signals above (not generic sales/tech language):
+- comparison_card_title: a short title naming the actual competitive category.
+- linkedin_posts: exactly 3 posts (angles competitor_gap, roi_outcome, thought_leader), each with a one-sentence hook and 3-4 hashtags relevant to this specific product's category and audience.
+- campaign_target_audience: one sentence on who actually buys/uses this product.
+- campaign_next_actions: 3 concrete next actions appropriate to this product's actual marketing channels.
+
 User context: {message}
 """
 
@@ -885,10 +994,12 @@ User context: {message}
         )
     except Exception as exc:
         _set_last_claude_error(f"Claude request failed: {str(exc)}")
+        _set_last_content_pack(None)
         return None
 
     if not result.variants:
         _set_last_claude_error("Claude returned empty variants")
+        _set_last_content_pack(None)
         return None
 
     variants: list[OutreachVariant] = []
@@ -912,9 +1023,11 @@ User context: {message}
 
     if not variants:
         _set_last_claude_error("Claude response did not contain valid subject/hook/cta fields")
+        _set_last_content_pack(None)
         return None
 
     _set_last_claude_error(None)
+    _set_last_content_pack(_content_pack_from_structured(result))
     return variants or None
 
 
@@ -925,6 +1038,8 @@ async def _generate_variants_with_ollama(
     learning_brief: str | None = None,
     preferred_angle: Literal["competitor_gap", "roi", "social_proof"] | None = None,
     product_name: str = "the product",
+    persona_line: str = "You are a B2B growth expert.",
+    style_hint: str = "cold-outreach email register, ROI/pipeline framing",
 ) -> list[OutreachVariant] | None:
     _set_last_ollama_error(None)
     config = _get_ollama_config()
@@ -937,13 +1052,21 @@ async def _generate_variants_with_ollama(
     signals_text = "\n".join([f"- [{s.source_type}] {s.raw_quote}" for s in top_signals])
     angle_a, angle_b = _preferred_variant_angles(preferred_angle)
     history_context = learning_brief or "No prior campaign winners available yet."
-    prompt = f"""You are a B2B growth expert.
+    prompt = f"""{persona_line} Write in {style_hint}.
 Return ONLY valid JSON in this exact schema:
 {{
   "variants": [
     {{"subject_line": "...", "hook": "...", "cta": "...", "hypothesis": "..."}},
     {{"subject_line": "...", "hook": "...", "cta": "...", "hypothesis": "..."}}
-  ]
+  ],
+  "comparison_card_title": "...",
+  "linkedin_posts": [
+    {{"angle": "competitor_gap", "hook": "...", "hashtags": ["...", "..."]}},
+    {{"angle": "roi_outcome", "hook": "...", "hashtags": ["...", "..."]}},
+    {{"angle": "thought_leader", "hook": "...", "hashtags": ["...", "..."]}}
+  ],
+  "campaign_target_audience": "...",
+  "campaign_next_actions": ["...", "...", "..."]
 }}
 
 Context signals:
@@ -958,6 +1081,7 @@ Task:
 - Variant B must lead with {_angle_prompt_name(angle_b)}.
 - Keep each field concise and specific.
 - If historical memory indicates a winning angle, bias your framing toward it unless current signals strongly contradict it.
+- Also fill comparison_card_title, linkedin_posts, campaign_target_audience, campaign_next_actions, all grounded in {product_name}'s real category -- not generic sales/tech language.
 
 User context: {message}
 """
@@ -979,6 +1103,7 @@ User context: {message}
             variants = _variants_from_structured_output(structured)
             if variants:
                 _set_last_ollama_error(None)
+                _set_last_content_pack(_content_pack_from_structured(structured))
                 return variants
 
             raise ValueError("ChatOllama returned variants but subject/hook/cta fields were empty")
@@ -1063,6 +1188,7 @@ User context: {message}
         return None
 
     _set_last_ollama_error(None)
+    _set_last_content_pack(_content_pack_from_structured(structured))
     return variants or None
 
 
@@ -1073,9 +1199,12 @@ async def _generate_variants_with_llm(
     learning_brief: str | None = None,
     preferred_angle: Literal["competitor_gap", "roi", "social_proof"] | None = None,
     product_name: str = "the product",
+    persona_line: str = "You are a B2B growth expert.",
+    style_hint: str = "cold-outreach email register, ROI/pipeline framing",
 ) -> list[OutreachVariant] | None:
     _set_last_ollama_error(None)
     _set_last_claude_error(None)
+    _set_last_content_pack(None)
     provider = _get_llm_provider()
     common_kwargs = {
         "message": message,
@@ -1083,6 +1212,8 @@ async def _generate_variants_with_llm(
         "learning_brief": learning_brief,
         "preferred_angle": preferred_angle,
         "product_name": product_name,
+        "persona_line": persona_line,
+        "style_hint": style_hint,
     }
 
     if provider == "ollama":
@@ -1247,13 +1378,23 @@ async def market_intelligence_node(state: dict[str, Any]) -> dict[str, Any]:
     # regardless of what's actually being asked. Claude first, live-search
     # fallback for the competitor half if that's unavailable/fails -- research
     # should never silently fall back to an unrelated domain list.
-    inferred_name, discovered_domains = await _infer_topic_context(message)
+    inferred_name, discovered_domains, topic_analysis = await _infer_topic_context(message)
     if not discovered_domains:
         discovered_domains = await discover_competitor_domains_via_search(message)
 
     product_name = state_model.product_name
     if product_name == DEFAULT_PRODUCT_NAME and inferred_name:
         product_name = inferred_name
+    elif product_name == DEFAULT_PRODUCT_NAME and not inferred_name:
+        _emit(
+            WarningEvent(
+                type="warning",
+                message="Could not infer the product name from this request; using the default demo product name. Set it explicitly in the Product Name field if this isn't intended.",
+                fallback_used=True,
+            )
+        )
+
+    product_category = topic_analysis.product_category if topic_analysis else state_model.product_category
 
     _emit(NodeStartedEvent(type="node_started", node="competitor_node", cycle_n=state_model.cycle_n))
     _emit(NodeStartedEvent(type="node_started", node="audience_node", cycle_n=state_model.cycle_n))
@@ -1268,7 +1409,7 @@ async def market_intelligence_node(state: dict[str, Any]) -> dict[str, Any]:
 
     results = await asyncio.gather(
         _collect_competitor_signals(message, discovered_domains),
-        _collect_audience_signals(message),
+        _collect_audience_signals(message, product_category),
         _collect_pestel_signals(message),
         scan_adjacent_via_mcp(message),
         _temporal_as_list(message),
@@ -1300,7 +1441,7 @@ async def market_intelligence_node(state: dict[str, Any]) -> dict[str, Any]:
         _emit(
             WarningEvent(
                 type="warning",
-                message="Competitor scraping returned no results; fallback competitor signals used.",
+                message="Competitor scraping returned no results for this topic; no competitor signal available this cycle.",
                 fallback_used=True,
             )
         )
@@ -1310,7 +1451,7 @@ async def market_intelligence_node(state: dict[str, Any]) -> dict[str, Any]:
         _emit(
             WarningEvent(
                 type="warning",
-                message="Audience scan returned no results; fallback audience signals used.",
+                message="Audience scan returned no results for this topic; no audience signal available this cycle.",
                 fallback_used=True,
             )
         )
@@ -1318,7 +1459,7 @@ async def market_intelligence_node(state: dict[str, Any]) -> dict[str, Any]:
     if not any(signal.source_type == "pestel" for signal in signals):
         signals.extend(_fallback_pestel_signals(message))
         pestel_reason = get_last_pestel_error()
-        pestel_message = "PESTEL scan returned no results; fallback macro signals used."
+        pestel_message = "PESTEL scan returned no results for this topic; no macro-trend signal available this cycle."
         if pestel_reason:
             pestel_message = f"{pestel_message} Details: {pestel_reason}"
         _emit(
@@ -1334,7 +1475,7 @@ async def market_intelligence_node(state: dict[str, Any]) -> dict[str, Any]:
         _emit(
             WarningEvent(
                 type="warning",
-                message="Adjacent-threat MCP scan returned no results; fallback signal used.",
+                message="Adjacent-threat scan returned no results for this topic; no adjacent-category signal available this cycle.",
                 fallback_used=True,
             )
         )
@@ -1379,6 +1520,7 @@ async def market_intelligence_node(state: dict[str, Any]) -> dict[str, Any]:
             "loop_stage": next_stage,
             "signals": [s.model_dump() for s in signals],
             "product_name": product_name,
+            "product_category": product_category,
         }
     )
     return next_state
@@ -1392,13 +1534,17 @@ async def content_gen_node(state: dict[str, Any]) -> dict[str, Any]:
     preferred_angle = _infer_winning_angle(state_model.campaign_history)
     learning_brief = _build_learning_brief(state_model.campaign_history, preferred_angle)
     provider = _get_llm_provider()
+    persona_line, style_hint = _persona_for_category(state_model.product_category)
     variants = await _generate_variants_with_llm(
         message=state_model.message,
         top_signals=top_signals,
         learning_brief=learning_brief,
         preferred_angle=preferred_angle,
         product_name=state_model.product_name,
+        persona_line=persona_line,
+        style_hint=style_hint,
     )
+    content_pack = get_last_generated_content_pack()
 
     if not variants:
         variants = _fallback_variants(top_signals, preferred_angle=preferred_angle, product_name=state_model.product_name)
@@ -1425,6 +1571,7 @@ async def content_gen_node(state: dict[str, Any]) -> dict[str, Any]:
         {
             "variants": [variant.model_dump() for variant in variants],
             "loop_stage": next_stage,
+            "content_pack": content_pack.model_dump() if content_pack else None,
         }
     )
     return next_state
@@ -1434,6 +1581,7 @@ def _build_comparison_card(
     signals: list[SignalReference],
     variants: list[OutreachVariant],
     product_name: str = "This product",
+    content_pack: ContentPack | None = None,
 ) -> dict[str, Any]:
     """Build comparison card data from competitor signals and generated variants."""
     competitors: list[dict[str, Any]] = []
@@ -1469,7 +1617,7 @@ def _build_comparison_card(
         seen_domains.add(domain)
 
         display_name = domain.replace(".co", "").replace(".ai", "").replace(".com", "").title()
-        tagline = signal.raw_quote[:100] if signal.raw_quote else "AI-powered SDR platform"
+        tagline = signal.raw_quote[:100] if signal.raw_quote else "Competitor in this market"
 
         strengths: list[str] = []
         weaknesses: list[str] = []
@@ -1500,46 +1648,64 @@ def _build_comparison_card(
             }
         )
 
-    # Ensure at least 3 entries for a meaningful comparison
-    defaults = [
-        {
-            "name": "Artisan",
-            "tagline": "Autonomous AI BDR — Hire Ava",
-            "strengths": ["All-in-one platform", "Autonomous prospecting"],
-            "weaknesses": ["Volume-first approach", "Limited signal transparency"],
-            "highlight": False,
-        },
-        {
-            "name": "11x",
-            "tagline": "AI workers that scale your go-to-market",
-            "strengths": ["Strong email automation", "Enterprise positioning"],
-            "weaknesses": ["Limited cross-channel transparency", "No closed-loop feedback"],
-            "highlight": False,
-        },
-    ]
-    existing_names = {c["name"].lower() for c in competitors}
-    for default in defaults:
-        if default["name"].lower() not in existing_names and len(competitors) < 4:
-            competitors.append(default)
+    # Never pad with unrelated hardcoded companies -- if live discovery found
+    # fewer real competitors, show fewer, and say so, rather than silently
+    # presenting fabricated filler as real findings.
+    real_competitor_count = len(competitors) - 1  # exclude our own product row
+    if real_competitor_count < 3:
+        _emit(
+            WarningEvent(
+                type="warning",
+                message=(
+                    f"Only {real_competitor_count} real competitor(s) found for this topic; "
+                    "comparison card shows fewer entries than usual."
+                ),
+                fallback_used=True,
+            )
+        )
 
     # Summary insight from audience/PESTEL signals
     audience_insight = next(
         (s.raw_quote for s in signals if s.source_type in {"audience", "pestel"}),
-        "B2B teams prioritize measurable pipeline outcomes over send-volume metrics.",
+        f"Limited live market signal available for {product_name} yet.",
+    )
+
+    title = (
+        content_pack.comparison_card_title
+        if content_pack and content_pack.comparison_card_title
+        else f"{product_name} Competitive Landscape"
     )
 
     return {
-        "title": "AI SDR Competitive Landscape",
+        "title": title,
         "subtitle": "Live signal comparison — generated from real-time market data",
         "competitors": competitors[:4],
         "market_insight": audience_insight[:200],
     }
 
 
+def _generic_hashtags_for_product(product_name: str, message: str) -> list[str]:
+    """Build hashtags from the product's own name/topic instead of a fixed
+    sales/tech vocabulary, so they're at least relevant to any category."""
+    tokens: list[str] = []
+    for word in re.findall(r"[A-Za-z0-9]+", f"{product_name} {message}"):
+        if len(word) < 3 or word.lower() in {"the", "and", "for", "with", "this", "that"}:
+            continue
+        tag = f"#{word[0].upper()}{word[1:]}"
+        if tag not in tokens:
+            tokens.append(tag)
+        if len(tokens) >= 3:
+            break
+    tokens.append("#MarketingStrategy")
+    return tokens[:4]
+
+
 def _build_linkedin_post_grid(
     signals: list[SignalReference],
     variants: list[OutreachVariant],
     message: str,
+    product_name: str = "This product",
+    content_pack: ContentPack | None = None,
 ) -> dict[str, Any]:
     def _best_signal_quote(source_type: str, fallback: str) -> str:
         for signal in signals:
@@ -1553,54 +1719,69 @@ def _build_linkedin_post_grid(
 
     competitor_quote = _best_signal_quote(
         "competitor",
-        "Most AI SDR tools still optimize for send volume over quality replies.",
+        f"Limited live competitor signal available for {product_name} yet.",
     )
     audience_quote = _best_signal_quote(
         "audience",
-        "Revenue teams want practical personalization and measurable outcomes.",
+        f"Limited live audience signal available for {product_name} yet.",
     )
     pestel_quote = _best_signal_quote(
         "pestel",
-        "AI SDR demand remains strong where pipeline attribution is clear.",
+        f"Limited live market-trend signal available for {product_name} yet.",
     )
 
     lead_variant = variants[0] if variants else None
     secondary_variant = variants[1] if len(variants) > 1 else lead_variant
+    default_hashtags = _generic_hashtags_for_product(product_name, message)
+    packed_posts = {p.angle: p for p in (content_pack.linkedin_posts if content_pack else [])}
+
+    def _copy_for(angle: str, fallback_hook: str) -> tuple[str, list[str]]:
+        packed = packed_posts.get(angle)
+        if packed and packed.hook:
+            return packed.hook[:120], (packed.hashtags[:4] if packed.hashtags else default_hashtags)
+        return fallback_hook[:120], default_hashtags
+
+    competitor_gap_hook, competitor_gap_tags = _copy_for("competitor_gap", competitor_quote)
+    roi_outcome_hook, roi_outcome_tags = _copy_for(
+        "roi_outcome",
+        lead_variant.subject_line if lead_variant else pestel_quote,
+    )
+    thought_leader_hook, thought_leader_tags = _copy_for("thought_leader", audience_quote)
 
     posts = [
         {
             "angle": "competitor_gap",
-            "hook": "Most AI SDR teams are scaling send volume, not reply quality.",
+            "hook": competitor_gap_hook,
             "body": (
                 f"Live market signal: \"{competitor_quote[:180]}\". "
-                "The next GTM edge isn’t more sends — it’s tighter intent-to-message fit with feedback loops."
+                f"For {product_name}, the edge isn't more volume — it's tighter fit with what buyers actually respond to."
             ),
-            "cta": "Comment ‘gap’ and I’ll share the 3-step competitor-gap teardown framework.",
-            "hashtags": ["#AISales", "#B2BSales", "#RevenueOps", "#SalesAutomation"],
+            "cta": "Comment and I’ll share how we’re thinking about this gap.",
+            "hashtags": competitor_gap_tags,
         },
         {
             "angle": "roi_outcome",
-            "hook": (lead_variant.subject_line if lead_variant else "What if your AI SDR strategy prioritized measurable pipeline lift?")[:120],
+            "hook": roi_outcome_hook,
             "body": (
                 f"Signal-backed insight: \"{pestel_quote[:170]}\". "
                 f"For teams we advise, this usually means focusing on one high-confidence hypothesis: "
-                f"{(lead_variant.hypothesis if lead_variant else 'ROI-led messaging')[:140]}."
+                f"{(lead_variant.hypothesis if lead_variant else 'a results-led message')[:140]}."
             ),
-            "cta": "Want the ROI-first outreach scorecard? Reply ‘ROI’.",
-            "hashtags": ["#Pipeline", "#RevenueGrowth", "#GTM", "#AISDR"],
+            "cta": "Want the details behind this? Reply and I'll share.",
+            "hashtags": roi_outcome_tags,
         },
         {
             "angle": "thought_leader",
-            "hook": "Personalization is no longer the differentiator — relevance velocity is.",
+            "hook": thought_leader_hook,
             "body": (
                 f"Audience signal says: \"{audience_quote[:170]}\". "
-                f"For {(message or 'this campaign')[:90]}, winning teams now ship fast experiments, score replies weekly, and double down on what converts."
+                f"For {(message or product_name)[:90]}, winning teams ship fast experiments and double down on what converts."
             ),
             "cta": (
-                f"If useful, I can post the exact weekly experimentation loop we use. "
-                f"({(secondary_variant.hypothesis if secondary_variant else 'Social proof + ROI blend')[:90]})"
+                f"If useful, I can share the exact experimentation loop we use. "
+                f"({(secondary_variant.hypothesis if secondary_variant else 'Signal-driven positioning')[:90]})"
             ),
-            "hashtags": ["#LinkedInTips", "#SalesStrategy", "#DemandGen", "#FounderLedSales"],
+            "hashtags": thought_leader_tags,
         },
     ]
 
@@ -1617,6 +1798,7 @@ def _build_campaign_brief(
     message: str,
     outreach_channel: str | None,
     product_name: str = "This product",
+    content_pack: ContentPack | None = None,
 ) -> dict[str, Any]:
     audience_quote = next(
         (
@@ -1625,7 +1807,7 @@ def _build_campaign_brief(
             if s.source_type == "audience"
             and (s.raw_quote or s.quote or s.content)
         ),
-        "Buyers prefer practical, high-signal outreach over generic personalization.",
+        f"Limited live audience signal available for {product_name} yet.",
     )
     competitor_quotes = [
         (s.raw_quote or s.quote or s.content or "").strip()
@@ -1638,10 +1820,7 @@ def _build_campaign_brief(
         if quote.strip()
     ]
     if not top_competitor_gaps:
-        top_competitor_gaps = [
-            "Most competitors over-index on send volume instead of reply quality.",
-            "Cross-channel transparency and feedback loops are often weak.",
-        ]
+        top_competitor_gaps = [f"Limited live competitor signal available for {product_name} yet."]
 
     key_messages: list[str] = []
     for variant in variants[:2]:
@@ -1656,21 +1835,32 @@ def _build_campaign_brief(
         else:
             recommended_channels = [outreach_channel, *(c for c in recommended_channels if c != outreach_channel)]
 
+    target_audience = (
+        content_pack.campaign_target_audience
+        if content_pack and content_pack.campaign_target_audience
+        else f"The buyers most likely to purchase {product_name}."
+    )
+    next_actions = (
+        content_pack.campaign_next_actions
+        if content_pack and content_pack.campaign_next_actions
+        else [
+            "Test two messaging variants with your target audience this week.",
+            "Publish the top-performing angle on your primary channel and track engagement.",
+            "Feed results back into the loop to refine the next cycle.",
+        ]
+    )
+
     return {
         "title": "Campaign Positioning Brief",
         "positioning_statement": (
-            f"{product_name} helps revenue teams turn live buyer + competitor signals into outbound "
-            "messaging that improves reply rates through continuous feedback loops."
+            f"{product_name} helps its target audience act on real signal — competitor moves, "
+            "audience demand, and market context — instead of guesswork, refined through continuous feedback."
         ),
-        "target_audience": "The buyers most likely to purchase this product",
+        "target_audience": target_audience,
         "key_messages": key_messages[:3],
         "competitor_gaps": top_competitor_gaps,
         "recommended_channels": recommended_channels,
-        "next_actions": [
-            "Run a 2-variant outreach test this week (competitor-gap vs ROI framing).",
-            "Publish one LinkedIn angle daily for 3 days and track comment quality.",
-            "Feed campaign metrics back into the loop to refine winner hypotheses.",
-        ],
+        "next_actions": next_actions,
         "context": message[:180],
     }
 
@@ -1688,12 +1878,14 @@ async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
         source_variants, top_signals, preferred_angle=preferred_angle, product_name=state_model.product_name
     )
 
+    image_style = _image_style_for_category(state_model.product_category)
     openai_images = await asyncio.gather(
         *[
             generate_variant_image_data_uri(
                 angle=_to_angle(variant.hypothesis),
                 hook=variant.hook,
                 product_name=state_model.product_name,
+                style_suffix=image_style,
             )
             for variant in variants
         ],
@@ -1710,6 +1902,7 @@ async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
             image_url = generate_variant_image_url(
                 angle=_to_angle(variant.hypothesis),
                 hook=variant.hook,
+                style_suffix=image_style,
             )
         resolved_variants.append(variant.model_copy(update={"image_url": image_url}))
     variants = resolved_variants
@@ -1742,7 +1935,9 @@ async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
     )
 
     # Emit a downloadable comparison card from competitor signals
-    comparison_card = _build_comparison_card(state_model.signals, variants, state_model.product_name)
+    comparison_card = _build_comparison_card(
+        state_model.signals, variants, state_model.product_name, state_model.content_pack
+    )
     _emit(
         UIRenderEvent(
             type="ui_render",
@@ -1752,7 +1947,9 @@ async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
         )
     )
 
-    linkedin_post_grid = _build_linkedin_post_grid(state_model.signals, variants, state_model.message)
+    linkedin_post_grid = _build_linkedin_post_grid(
+        state_model.signals, variants, state_model.message, state_model.product_name, state_model.content_pack
+    )
     _emit(
         UIRenderEvent(
             type="ui_render",
@@ -1768,6 +1965,7 @@ async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
         state_model.message,
         state_model.outreach_channel,
         state_model.product_name,
+        state_model.content_pack,
     )
     _emit(
         UIRenderEvent(
@@ -1841,50 +2039,73 @@ async def outreach_node(state: dict[str, Any]) -> dict[str, Any]:
             UIRenderEvent(
                 type="ui_render",
                 component=UIComponent.LINKEDIN_POST_GRID,
-                props=_build_linkedin_post_grid(state_model.signals, state_model.variants, state_model.message),
+                props=_build_linkedin_post_grid(
+                    state_model.signals,
+                    state_model.variants,
+                    state_model.message,
+                    state_model.product_name,
+                    state_model.content_pack,
+                ),
                 cycle_n=state_model.cycle_n,
             )
         )
 
-    discord_message_ids: list[str] = []
-    try:
-        for idx, variant in enumerate(state_model.variants[:2]):
-            label = f"Variant {chr(65 + idx)} — Cycle {state_model.cycle_n}"
-            posted = await post_variant_message(
-                label=label,
-                content=_variant_post_content(variant, label),
-                image_url=variant.image_url,
-            )
-            discord_message_ids.append(str(posted["id"]))
-        metrics = _zero_metrics(len(discord_message_ids))
-    except DiscordNotConfigured:
-        _emit(
-            WarningEvent(
-                type="warning",
-                message="Discord channel not configured; using simulated engagement metrics.",
-                fallback_used=True,
-            )
-        )
-        metrics = [
-            {"variant": 0, "open_rate": 0.44, "reply_rate": 0.11, "click_rate": 0.08},
-            {"variant": 1, "open_rate": 0.49, "reply_rate": 0.18, "click_rate": 0.1},
-        ]
-    except Exception as exc:
-        _emit(
-            WarningEvent(
-                type="warning",
-                message=f"Discord post failed ({str(exc)[:160]}); using simulated engagement metrics.",
-                fallback_used=True,
-            )
-        )
-        metrics = [
-            {"variant": 0, "open_rate": 0.44, "reply_rate": 0.11, "click_rate": 0.08},
-            {"variant": 1, "open_rate": 0.49, "reply_rate": 0.18, "click_rate": 0.1},
-        ]
+    # Sends (Discord post, real email) only fire on an explicit user click
+    # (channel_select / deploy_variant sets outreach_requested=True for that
+    # one run) -- never automatically as the graph loops through a new cycle.
+    # This also keeps each channel independent: picking "LinkedIn" alone no
+    # longer also fires the email send, and vice versa.
+    should_post_discord = state_model.outreach_requested and selected_channel in {"LinkedIn", "Both"}
+    should_send_email = state_model.outreach_requested and selected_channel in {"Email", "Both"}
 
-    resend_email_ids: list[str] = []
-    if selected_channel in {"Email", "Both"}:
+    discord_message_ids: list[str] = state_model.discord_message_ids
+    metrics: list[dict[str, Any]] = state_model.ab_results or _zero_metrics(min(2, len(state_model.variants)))
+    if should_post_discord:
         try:
+            new_discord_ids: list[str] = []
+            for idx, variant in enumerate(state_model.variants[:2]):
+                label = f"Variant {chr(65 + idx)} — Cycle {state_model.cycle_n}"
+                posted = await post_variant_message(
+                    label=label,
+                    content=_variant_post_content(variant, label),
+                    image_url=variant.image_url,
+                )
+                new_discord_ids.append(str(posted["id"]))
+            discord_message_ids = new_discord_ids
+            metrics = _zero_metrics(len(discord_message_ids))
+        except DiscordNotConfigured:
+            _emit(
+                WarningEvent(
+                    type="warning",
+                    message="Discord channel not configured; using simulated engagement metrics.",
+                    fallback_used=True,
+                )
+            )
+            metrics = [
+                {"variant": 0, "open_rate": 0.44, "reply_rate": 0.11, "click_rate": 0.08},
+                {"variant": 1, "open_rate": 0.49, "reply_rate": 0.18, "click_rate": 0.1},
+            ]
+        except Exception as exc:
+            _emit(
+                WarningEvent(
+                    type="warning",
+                    message=f"Discord post failed ({str(exc)[:160]}); using simulated engagement metrics.",
+                    fallback_used=True,
+                )
+            )
+            metrics = [
+                {"variant": 0, "open_rate": 0.44, "reply_rate": 0.11, "click_rate": 0.08},
+                {"variant": 1, "open_rate": 0.49, "reply_rate": 0.18, "click_rate": 0.1},
+            ]
+
+    resend_email_ids: list[str] = state_model.resend_email_ids
+    if should_send_email:
+        try:
+            # Capped at 2 variants per send (existing behavior) to stay well
+            # under the provider's daily email quota -- sends now only happen
+            # on an explicit click, never automatically, which is the other
+            # half of using that quota conservatively.
+            new_resend_ids: list[str] = []
             for idx, variant in enumerate(state_model.variants[:2]):
                 label = f"Variant {chr(65 + idx)} — Cycle {state_model.cycle_n}"
                 sent = await send_variant_email(
@@ -1894,7 +2115,8 @@ async def outreach_node(state: dict[str, Any]) -> dict[str, Any]:
                     cta=variant.cta,
                     image_url=variant.image_url,
                 )
-                resend_email_ids.append(str(sent["id"]))
+                new_resend_ids.append(str(sent["id"]))
+            resend_email_ids = new_resend_ids
         except ResendNotConfigured:
             _emit(
                 WarningEvent(
@@ -1947,6 +2169,10 @@ async def outreach_node(state: dict[str, Any]) -> dict[str, Any]:
             "loop_stage": next_stage,
             "discord_message_ids": discord_message_ids,
             "resend_email_ids": resend_email_ids,
+            # Always reset: outreach_requested must be re-set explicitly by
+            # the next channel_select/deploy_variant click, not inherited by
+            # a later automatic cycle transition.
+            "outreach_requested": False,
         }
     )
     return next_state
@@ -1980,7 +2206,17 @@ async def feedback_ingestor_node(state: dict[str, Any]) -> dict[str, Any]:
 
     if feedback_events:
         feedback = feedback_events[-1]
-        top_signal = max(state_model.signals, key=lambda s: s.confidence).content if state_model.signals else "No top signal"
+        # Scoped to the variant that actually won THIS cycle, not the
+        # highest-confidence signal ever seen across the whole thread --
+        # otherwise an early high-confidence signal keeps "winning" here
+        # forever, showing the same sentence even when a different variant
+        # wins in a later cycle.
+        if winner_variant and winner_variant.provenance_chain:
+            top_signal = max(winner_variant.provenance_chain, key=lambda s: s.confidence).content
+        elif state_model.signals:
+            top_signal = max(state_model.signals, key=lambda s: s.confidence).content
+        else:
+            top_signal = "No top signal"
         winner_metric = max(effective_metrics, key=lambda m: float(m.get("reply_rate", 0)), default={})
 
         cycle_result = CycleResult(

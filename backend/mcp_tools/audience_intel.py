@@ -163,7 +163,6 @@ def _topic_start_urls(topic: str, limit_per_subreddit: int, subreddits: tuple[st
             }
         )
 
-    urls.append({"url": "https://www.reddit.com/r/sales/top/?t=month"})
     return urls
 
 
@@ -593,7 +592,7 @@ def _build_apify_actor_inputs(
 
     set_if_present(["query", "search", "searchTerm", "searchQuery", "keyword", "keywords"], normalized_topic)
     set_if_present(["subreddits", "communities", "subredditNames", "subredditList"], subreddit_list)
-    set_if_present(["subreddit", "community"], "sales")
+    set_if_present(["subreddit", "community"], subreddit_list[0] if subreddit_list else "")
     set_if_present(["limit", "maxItems", "maxResults", "resultsLimit", "postsLimit", "maxPosts"], max_items)
     set_if_present(["sort", "sortBy", "postSort"], "top")
     set_if_present(["time", "timeFilter", "timeRange", "period"], "year")
@@ -784,7 +783,9 @@ async def scan_hot_posts(subreddit: str = "sales", limit: int = 10) -> list[Sign
             return []
 
 
-async def scan_audience_intent(topic: str, limit_per_subreddit: int = 5) -> list[SignalReference]:
+async def scan_audience_intent(
+    topic: str, limit_per_subreddit: int = 5, product_category: str | None = None
+) -> list[SignalReference]:
     """Scan audience intent using Apify Reddit Actor first, then direct Reddit JSON fallback."""
     try:
         from mcp_tools.job_signals import scan_job_market_signals
@@ -823,8 +824,10 @@ async def scan_audience_intent(topic: str, limit_per_subreddit: int = 5) -> list
                     )
                     reddit_signals.extend(subreddit_signals)
 
-            # Add broader sentiment context from monthly top posts in r/sales.
-            monthly_targets = ["sales"]
+            # Add broader sentiment context from monthly top posts in whatever
+            # geo-relevant subreddits this topic actually has -- no hardcoded
+            # r/sales pull for topics with no geo hint at all.
+            monthly_targets: list[str] = []
             for geo_subreddit in get_geo_subreddit_hints(topic):
                 if geo_subreddit not in monthly_targets:
                     monthly_targets.append(geo_subreddit)
@@ -839,13 +842,21 @@ async def scan_audience_intent(topic: str, limit_per_subreddit: int = 5) -> list
                 )
                 reddit_signals.extend(top_monthly)
 
+    # HackerNews and YouTube genuinely filter by the query, so they're safe
+    # to run for any topic (empty result if nothing matches). G2 (a B2B
+    # software review site) and Remotive (a remote *tech-jobs* board that
+    # was observed to ignore an unmatched search term and just return its
+    # generic top-of-feed tech postings instead of nothing) only produce
+    # real signal for actual software/tech products -- for anything else
+    # they either waste a call or inject irrelevant "audience" signal.
     tasks: list[Any] = [
         scan_hackernews(topic),
-        scan_g2_reviews(topic),
         scan_youtube_comments(topic),
     ]
-    if scan_job_market_signals is not None:
-        tasks.append(scan_job_market_signals(topic))
+    if product_category == "b2b_saas_tech":
+        tasks.append(scan_g2_reviews(topic))
+        if scan_job_market_signals is not None:
+            tasks.append(scan_job_market_signals(topic))
 
     extra_results = await asyncio.gather(*tasks, return_exceptions=True)
 

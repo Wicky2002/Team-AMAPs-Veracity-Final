@@ -11,6 +11,7 @@ import sys
 import uuid
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -366,6 +367,9 @@ class TestAPIEndpoints:
         )
 
         class _BrokenGraph:
+            async def aget_state(self, *args, **kwargs):
+                return SimpleNamespace(values={})
+
             async def astream(self, *args, **kwargs):
                 raise disconnect_error
                 if False:
@@ -397,6 +401,9 @@ class TestAPIEndpoints:
         }
 
         class _BrokenGraph:
+            async def aget_state(self, *args, **kwargs):
+                return SimpleNamespace(values={})
+
             async def astream(self, *args, **kwargs):
                 raise RuntimeError("boom")
                 if False:
