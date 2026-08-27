@@ -35,6 +35,45 @@ export function CampaignTimeline({ entries }: Props) {
         </div>
       ) : (
         <>
+          {entries.length >= 2 &&
+            (() => {
+              const previous = entries[entries.length - 2];
+              const current = entries[entries.length - 1];
+              const delta = (a: number, b: number) => {
+                const diffPts = (b - a) * 100;
+                const sign = diffPts > 0 ? '+' : '';
+                return `${sign}${diffPts.toFixed(1)}pt`;
+              };
+              const deltaColor = (a: number, b: number) =>
+                b >= a
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : 'text-red-600 dark:text-red-400';
+
+              return (
+                <div className="mt-4 rounded-xl border border-indigo-200 bg-indigo-50/70 p-3 dark:border-indigo-500/30 dark:bg-indigo-950/30">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-300">
+                    Improvement since last cycle
+                  </p>
+                  <div className="mt-2 grid grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <p className="font-semibold text-slate-500 dark:text-slate-400">Cycle {previous.cycle_n} (before)</p>
+                      <p className="mt-1 text-slate-700 dark:text-slate-200">Open {(previous.open_rate * 100).toFixed(1)}%</p>
+                      <p className="text-slate-700 dark:text-slate-200">Reply {(previous.reply_rate * 100).toFixed(1)}%</p>
+                    </div>
+                    <div>
+                      <p className="font-semibold text-slate-500 dark:text-slate-400">Cycle {current.cycle_n} (after)</p>
+                      <p className={`mt-1 font-semibold ${deltaColor(previous.open_rate, current.open_rate)}`}>
+                        Open {(current.open_rate * 100).toFixed(1)}% ({delta(previous.open_rate, current.open_rate)})
+                      </p>
+                      <p className={`font-semibold ${deltaColor(previous.reply_rate, current.reply_rate)}`}>
+                        Reply {(current.reply_rate * 100).toFixed(1)}% ({delta(previous.reply_rate, current.reply_rate)})
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
           <AngleLearningChart entries={entries} />
           <ol className="mt-4 space-y-3 text-sm">
           {entries.map((entry, idx) => (

@@ -305,8 +305,20 @@ export default function Home() {
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [status, setStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
   const [threadId, setThreadId] = useState('');
+  const [starting, setStarting] = useState(false);
+  const [justCleared, setJustCleared] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
+  const noticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showNotice = (text: string) => {
+    setNotice(text);
+    if (noticeTimeoutRef.current) {
+      clearTimeout(noticeTimeoutRef.current);
+    }
+    noticeTimeoutRef.current = setTimeout(() => setNotice(null), 4000);
+  };
 
   useEffect(() => {
     try {
@@ -368,11 +380,17 @@ export default function Home() {
       product_name: productName,
     });
 
+    setStarting(true);
     setStatus('running');
     const source = new EventSource(`/api/loop/proxy?${params.toString()}`);
     eventSourceRef.current = source;
 
+    source.onopen = () => {
+      setStarting(false);
+    };
+
     source.onmessage = (event) => {
+      setStarting(false);
       appendEvent(event.data);
 
       try {
@@ -388,6 +406,7 @@ export default function Home() {
     };
 
     source.onerror = () => {
+      setStarting(false);
       setStatus('error');
       source.close();
     };
@@ -395,6 +414,7 @@ export default function Home() {
 
   const stopLoop = () => {
     eventSourceRef.current?.close();
+    setStarting(false);
     setStatus('done');
   };
 
@@ -410,6 +430,8 @@ export default function Home() {
     setRawEvents([]);
     setTimeline([]);
     setStatus('idle');
+    setJustCleared(true);
+    setTimeout(() => setJustCleared(false), 1500);
   };
 
   const emitActionWarning = (message: string) => {
@@ -679,8 +701,11 @@ export default function Home() {
             <ABVariantGrid
               key={`ui-ab-${index}`}
               variants={toVariants(event.props)}
-              onDeploy={(variant) => {
-                void sendAction('deploy_variant', { variant });
+              onDeploy={async (variant) => {
+                showNotice(`Deploying "${variant.subject_line}"…`);
+                await sendAction('deploy_variant', { variant });
+                showNotice('Variant deployed. Checking delivery status…');
+                await refreshEmailStatus();
               }}
             />
           );
@@ -689,8 +714,15 @@ export default function Home() {
             <ChannelIntentPicker
               key={`ui-channel-${index}`}
               selected={typeof event.props.selected === 'string' ? event.props.selected : undefined}
-              onSelect={(channel) => {
-                void sendAction('channel_select', { channel });
+              onSelect={async (channel) => {
+                showNotice(`Setting channel to ${channel}…`);
+                await sendAction('channel_select', { channel });
+                if (channel === 'Email' || channel === 'Both') {
+                  showNotice('Channel set. Checking email delivery status…');
+                  await refreshEmailStatus();
+                } else {
+                  showNotice(`Channel set to ${channel}.`);
+                }
               }}
             />
           );
@@ -700,17 +732,22 @@ export default function Home() {
               key={`ui-feedback-${index}`}
               metrics={toMetrics(event.props)}
               emailStatuses={toEmailStatuses(event.props)}
-              onRefresh={() => {
-                void refreshEngagement();
+              onRefresh={async () => {
+                showNotice('Refreshing reactions…');
+                await refreshEngagement();
+                showNotice('Reactions refreshed.');
               }}
-              onRefreshEmail={() => {
-                void refreshEmailStatus();
+              onRefreshEmail={async () => {
+                showNotice('Refreshing email delivery status…');
+                await refreshEmailStatus();
+                showNotice('Email status refreshed.');
               }}
-              onFeedback={() => {
+              onFeedback={async () => {
                 const metrics = toMetrics(event.props);
                 const winner = metrics.length > 0 ? metrics.reduce((a, b) => (a.reply_rate > b.reply_rate ? a : b)) : null;
                 const winnerLabel = winner ? `Variant ${String.fromCharCode(65 + winner.variant)}` : 'Variant A';
-                void sendAction('feedback', {
+                showNotice('Feedback sent — starting next research cycle…');
+                await sendAction('feedback', {
                   note: winner
                     ? `${winnerLabel} led with a ${(winner.reply_rate * 100).toFixed(1)}% share of live Discord engagement.`
                     : 'No engagement recorded yet for this cycle.',
@@ -836,14 +873,16 @@ export default function Home() {
           <button
             type="button"
             onClick={startLoop}
-            className="rounded-xl bg-linear-to-r from-indigo-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/25 transition hover:from-indigo-500 hover:to-blue-500"
+            disabled={starting || status === 'running'}
+            className="rounded-xl bg-linear-to-r from-indigo-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/25 transition hover:from-indigo-500 hover:to-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            Start Loop
+            {starting ? 'Starting…' : 'Start Loop'}
           </button>
           <button
             type="button"
             onClick={stopLoop}
-            className="rounded-xl border border-slate-300 bg-white/90 px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            disabled={status !== 'running'}
+            className="rounded-xl border border-slate-300 bg-white/90 px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
           >
             Stop
           </button>
@@ -851,15 +890,21 @@ export default function Home() {
             type="button"
             onClick={newThread}
             title="Start a brand-new thread (clears the saved thread id)"
-            className="rounded-xl border border-slate-300 bg-white\90 px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            className="rounded-xl border border-slate-300 bg-white/90 px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
           >
-            New Thread
+            {justCleared ? 'Cleared ✓' : 'New Thread'}
           </button>
         </div>
 
         <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
           Thread: <code className="rounded bg-slate-100 px-1.5 py-0.5 dark:bg-slate-800">{threadId || 'initializing...'}</code> • Events: {events.length} • Cycles logged: {timeline.length}
         </p>
+
+        {notice && (
+          <div className="mt-3 rounded-lg border border-indigo-200 bg-indigo-50/90 px-3 py-2 text-xs font-medium text-indigo-800 shadow-sm dark:border-indigo-500/30 dark:bg-indigo-950/40 dark:text-indigo-200">
+            {notice}
+          </div>
+        )}
       </header>
 
       <div className="grid gap-5 lg:grid-cols-[1.8fr_1fr]">
@@ -883,8 +928,15 @@ export default function Home() {
         <CampaignTimeline entries={timeline} />
       </div>
 
-      <section className="rounded-2xl border border-slate-200/70 bg-white/75 p-4 shadow-lg shadow-slate-200/40 backdrop-blur dark:border-slate-800 dark:bg-slate-950/65 dark:shadow-none">
-        <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Raw SSE Event Log</h2>
+      <details className="group rounded-2xl border border-slate-200/70 bg-white/75 p-4 shadow-lg shadow-slate-200/40 backdrop-blur dark:border-slate-800 dark:bg-slate-950/65 dark:shadow-none">
+        <summary className="flex cursor-pointer list-none items-center justify-between text-lg font-semibold text-slate-900 dark:text-slate-100">
+          <span>
+            Developer Log
+            <span className="ml-2 align-middle text-xs font-medium text-slate-400 dark:text-slate-500">({rawEvents.length} raw events)</span>
+          </span>
+          <span className="text-xs font-medium text-indigo-600 group-open:hidden dark:text-indigo-300">Show ▸</span>
+          <span className="hidden text-xs font-medium text-indigo-600 group-open:inline dark:text-indigo-300">Hide ▾</span>
+        </summary>
         <div className="mt-3 max-h-80 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950 p-3 font-mono text-xs text-slate-100 shadow-inner">
           {rawEvents.map((event, index) => (
             <pre key={`${event}-${index}`} className="whitespace-pre-wrap wrap-break-word border-b border-slate-800/80 py-2">
@@ -893,7 +945,7 @@ export default function Home() {
           ))}
           {rawEvents.length === 0 && <p className="text-slate-400">No events yet. Start the loop.</p>}
         </div>
-      </section>
+      </details>
     </main>
   );
 }

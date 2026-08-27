@@ -6,7 +6,7 @@ import type { OutreachVariant } from '@/lib/loop-types';
 
 type Props = {
   variants: OutreachVariant[];
-  onDeploy: (variant: OutreachVariant) => void;
+  onDeploy: (variant: OutreachVariant) => Promise<void> | void;
 };
 
 const SOURCE_TYPE_CLASSES: Record<string, string> = {
@@ -24,6 +24,7 @@ const SOURCE_TYPE_CLASSES: Record<string, string> = {
 
 export function ABVariantGrid({ variants, onDeploy }: Props) {
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const [deployingKey, setDeployingKey] = useState<string | null>(null);
 
   return (
     <section className="rounded-2xl border border-slate-200/70 bg-white/80 p-4 shadow-lg shadow-slate-200/40 backdrop-blur dark:border-slate-800 dark:bg-slate-950/65 dark:shadow-none">
@@ -115,11 +116,19 @@ export function ABVariantGrid({ variants, onDeploy }: Props) {
               )}
 
               <button
-                className="mt-4 rounded-lg bg-linear-to-r from-slate-900 to-indigo-700 px-3 py-2 text-sm font-semibold text-white shadow-md transition hover:from-slate-800 hover:to-indigo-600 dark:from-indigo-600 dark:to-blue-600"
-                onClick={() => onDeploy(variant)}
+                className="mt-4 rounded-lg bg-linear-to-r from-slate-900 to-indigo-700 px-3 py-2 text-sm font-semibold text-white shadow-md transition hover:from-slate-800 hover:to-indigo-600 disabled:cursor-not-allowed disabled:opacity-60 dark:from-indigo-600 dark:to-blue-600"
+                disabled={deployingKey === key}
+                onClick={async () => {
+                  setDeployingKey(key);
+                  try {
+                    await onDeploy(variant);
+                  } finally {
+                    setDeployingKey(null);
+                  }
+                }}
                 type="button"
               >
-                Deploy This Variant
+                {deployingKey === key ? 'Deploying…' : 'Deploy This Variant'}
               </button>
             </article>
           );

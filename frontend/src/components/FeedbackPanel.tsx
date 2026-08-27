@@ -1,17 +1,33 @@
+'use client';
+
+import { useState } from 'react';
+
 import type { EmailStatus, FeedbackMetric } from '@/lib/loop-types';
 
 type Props = {
   metrics: FeedbackMetric[];
-  onFeedback: () => void;
-  onRefresh?: () => void;
+  onFeedback: () => Promise<void> | void;
+  onRefresh?: () => Promise<void> | void;
   emailStatuses?: EmailStatus[];
-  onRefreshEmail?: () => void;
+  onRefreshEmail?: () => Promise<void> | void;
 };
 
+type PendingAction = 'reactions' | 'email' | 'feedback' | null;
+
 export function FeedbackPanel({ metrics, onFeedback, onRefresh, emailStatuses = [], onRefreshEmail }: Props) {
+  const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const winner = metrics.length > 0 ? metrics.reduce((a, b) => (a.reply_rate > b.reply_rate ? a : b)) : null;
 
   const metricBar = (value: number) => `${Math.max(0, Math.min(100, value * 100))}%`;
+
+  const runAction = async (action: Exclude<PendingAction, null>, handler: () => Promise<void> | void) => {
+    setPendingAction(action);
+    try {
+      await handler();
+    } finally {
+      setPendingAction(null);
+    }
+  };
 
   return (
     <section className="rounded-2xl border border-slate-200/70 bg-white/80 p-4 shadow-lg shadow-slate-200/40 backdrop-blur dark:border-slate-800 dark:bg-slate-950/65 dark:shadow-none">
@@ -78,27 +94,30 @@ export function FeedbackPanel({ metrics, onFeedback, onRefresh, emailStatuses = 
         {onRefresh && (
           <button
             type="button"
-            onClick={onRefresh}
-            className="rounded-lg border border-slate-300 bg-white/90 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            disabled={pendingAction !== null}
+            onClick={() => void runAction('reactions', onRefresh)}
+            className="rounded-lg border border-slate-300 bg-white/90 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
           >
-            ↻ Refresh Reactions
+            {pendingAction === 'reactions' ? 'Refreshing…' : '↻ Refresh Reactions'}
           </button>
         )}
         {onRefreshEmail && (
           <button
             type="button"
-            onClick={onRefreshEmail}
-            className="rounded-lg border border-slate-300 bg-white/90 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            disabled={pendingAction !== null}
+            onClick={() => void runAction('email', onRefreshEmail)}
+            className="rounded-lg border border-slate-300 bg-white/90 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
           >
-            ↻ Refresh Email Status
+            {pendingAction === 'email' ? 'Refreshing…' : '↻ Refresh Email Status'}
           </button>
         )}
         <button
           type="button"
-          onClick={onFeedback}
-          className="rounded-lg bg-linear-to-r from-emerald-600 to-teal-600 px-4 py-2 text-sm font-semibold text-white shadow-md transition hover:from-emerald-500 hover:to-teal-500"
+          disabled={pendingAction !== null}
+          onClick={() => void runAction('feedback', onFeedback)}
+          className="rounded-lg bg-linear-to-r from-emerald-600 to-teal-600 px-4 py-2 text-sm font-semibold text-white shadow-md transition hover:from-emerald-500 hover:to-teal-500 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          Feed Results Back →
+          {pendingAction === 'feedback' ? 'Sending Feedback…' : 'Feed Results Back →'}
         </button>
       </div>
     </section>

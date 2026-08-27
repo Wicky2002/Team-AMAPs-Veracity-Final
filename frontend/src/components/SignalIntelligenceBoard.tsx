@@ -62,6 +62,14 @@ export function SignalIntelligenceBoard({ signals, onDrill }: Props) {
                         ★ verified
                       </span>
                     )}
+                    {signal.credibility_tier === 'mid' && (
+                      <span
+                        title="Identifiable, verifiable source (community/social)"
+                        className="rounded-full border border-sky-400 bg-sky-50 px-1.5 py-0.5 text-[9px] font-bold text-sky-700 dark:border-sky-500/40 dark:bg-sky-900/30 dark:text-sky-300"
+                      >
+                        ◇ sourced
+                      </span>
+                    )}
                     <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${sourceTypeClasses[type]}`}>
                       {type}
                     </span>
