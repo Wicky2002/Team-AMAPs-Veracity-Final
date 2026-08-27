@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { ABVariantGrid } from '@/components/ABVariantGrid';
 import { CampaignBriefCard } from '@/components/CampaignBriefCard';
@@ -308,6 +308,17 @@ export default function Home() {
 
   const eventSourceRef = useRef<EventSource | null>(null);
 
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem('veracity_thread_id');
+      if (stored) {
+        setThreadId(stored);
+      }
+    } catch {
+      // localStorage unavailable (private mode, etc.) -- fall back to in-memory only.
+    }
+  }, []);
+
   const resolveThreadId = () => {
     if (threadId) {
       return threadId;
@@ -315,6 +326,11 @@ export default function Home() {
 
     const generated = crypto.randomUUID();
     setThreadId(generated);
+    try {
+      window.localStorage.setItem('veracity_thread_id', generated);
+    } catch {
+      // localStorage unavailable -- thread id still works for this page session.
+    }
     return generated;
   };
 
@@ -380,6 +396,20 @@ export default function Home() {
   const stopLoop = () => {
     eventSourceRef.current?.close();
     setStatus('done');
+  };
+
+  const newThread = () => {
+    eventSourceRef.current?.close();
+    try {
+      window.localStorage.removeItem('veracity_thread_id');
+    } catch {
+      // localStorage unavailable -- clearing in-memory state below is still enough.
+    }
+    setThreadId('');
+    setEvents([]);
+    setRawEvents([]);
+    setTimeline([]);
+    setStatus('idle');
   };
 
   const emitActionWarning = (message: string) => {
@@ -816,6 +846,14 @@ export default function Home() {
             className="rounded-xl border border-slate-300 bg-white/90 px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
           >
             Stop
+          </button>
+          <button
+            type="button"
+            onClick={newThread}
+            title="Start a brand-new thread (clears the saved thread id)"
+            className="rounded-xl border border-slate-300 bg-white\90 px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            New Thread
           </button>
         </div>
 
