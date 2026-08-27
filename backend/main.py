@@ -230,7 +230,15 @@ async def inject_action(body: LoopActionRequest):
         "thread_id": body.thread_id,
         "applied_action": body.action_type,
         "event_count": len(events),
-        "latest_events": events[-10:],
+        # Every event from this action, not just the tail -- a new cycle can
+        # emit 30-70+ events (research -> content_gen -> ab_variant ->
+        # outreach -> feedback), and truncating to the last 10 was silently
+        # dropping the ABVariantGrid/SignalIntelligenceBoard renders whenever
+        # more warnings/signals landed after them in the stream (e.g. missing
+        # API keys -> more fallback warnings -> truncation window shifts
+        # later), leaving the frontend showing the previous cycle's stale
+        # variants/images with no new render event to replace them.
+        "latest_events": events,
     }
 
 

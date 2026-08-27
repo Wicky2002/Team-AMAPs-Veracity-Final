@@ -1983,6 +1983,14 @@ async def ab_variant_node(state: dict[str, Any]) -> dict[str, Any]:
         {
             "variants": variant_payload,
             "loop_stage": next_stage,
+            # These describe the PREVIOUS cycle's variants' real performance --
+            # carrying them forward here would make brand-new, never-deployed
+            # variants look like they inherited the old variants' engagement
+            # numbers (e.g. the timeline showing an identical reply rate two
+            # cycles in a row even though nothing has been re-tested yet).
+            "ab_results": [],
+            "discord_message_ids": [],
+            "resend_email_ids": [],
         }
     )
     return next_state

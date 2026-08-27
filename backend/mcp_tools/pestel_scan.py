@@ -65,10 +65,15 @@ def _topic_tokens(topic: str) -> set[str]:
     return tokens
 
 
+class SerpApiAuthError(RuntimeError):
+    """The API key itself is missing/invalid -- retrying with a different
+    query will never fix this, unlike a plain "no results for this query"."""
+
+
 async def _query_serpapi(params: dict[str, Any]) -> dict[str, Any]:
     api_key = os.getenv("SERP_API_KEY", "").strip()
     if not api_key:
-        raise RuntimeError("SERP_API_KEY is missing")
+        raise SerpApiAuthError("SERP_API_KEY is missing")
 
     req_params = {**params, "api_key": api_key}
     async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
@@ -77,6 +82,8 @@ async def _query_serpapi(params: dict[str, Any]) -> dict[str, Any]:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             body_preview = exc.response.text[:220].replace("\n", " ")
+            if exc.response.status_code in (401, 403):
+                raise SerpApiAuthError(f"SerpAPI HTTP {exc.response.status_code}: {body_preview}") from exc
             raise RuntimeError(f"SerpAPI HTTP {exc.response.status_code}: {body_preview}") from exc
 
         payload = response.json()
@@ -276,6 +283,30 @@ async def _scan_google_trends_rss(topic: str, geo_params: dict[str, Any]) -> lis
     return signals
 
 
+async def _trends_rss_fallback(
+    query: str, geo_params: dict[str, Any], signals: list[SignalReference], diagnostics: list[str]
+) -> None:
+    try:
+        trends_rss_signals = await _scan_google_trends_rss(query, geo_params)
+        signals.extend(trends_rss_signals)
+        if not trends_rss_signals:
+            diagnostics.append(f"Google Trends RSS returned no matching topics for '{query}'")
+    except Exception as rss_exc:
+        diagnostics.append(f"Google Trends RSS failed for '{query}' ({str(rss_exc)})")
+
+
+async def _newsapi_fallback(
+    query: str, geo_params: dict[str, Any], signals: list[SignalReference], diagnostics: list[str]
+) -> None:
+    try:
+        newsapi_signals = await _scan_newsapi(query, geo_params)
+        signals.extend(newsapi_signals)
+        if not newsapi_signals:
+            diagnostics.append(f"NewsAPI returned no articles for '{query}'")
+    except Exception as news_exc:
+        diagnostics.append(f"NewsAPI request failed for '{query}' ({str(news_exc)})")
+
+
 async def scan_pestel_trends(topic: str) -> list[SignalReference]:
     """Collect macro market signals via SerpAPI Trends + Google News."""
     _set_last_pestel_error(None)
@@ -284,49 +315,59 @@ async def scan_pestel_trends(topic: str) -> list[SignalReference]:
 
     geo_params = _geo_params_for_topic(topic)
     query_variants = _pestel_query_variants(topic)
+    # Once we know the key itself is missing/invalid, stop calling SerpAPI
+    # for the remaining query variants -- a different query text will never
+    # fix an auth error, and retrying it up to 6x (trends + news each) just
+    # burns real network round-trips for a guaranteed-identical failure,
+    # adding real latency to every research cycle for no benefit. The free
+    # fallbacks (RSS/NewsAPI) still get tried per variant since those
+    # genuinely can differ by query.
+    serpapi_unavailable = False
 
     for query in query_variants:
-        try:
-            trends_params: dict[str, Any] = {"engine": "google_trends", "q": query}
-            if "geo" in geo_params:
-                trends_params["geo"] = geo_params["geo"]
-
-            trends_payload = await _query_serpapi(trends_params)
-            trend_signals = _parse_trends(query, trends_payload)
-            signals.extend(trend_signals)
-            if not trend_signals:
-                diagnostics.append(f"Google Trends returned no interest_over_time rows for '{query}'")
-        except Exception as exc:
-            diagnostics.append(f"Google Trends request failed for '{query}' ({str(exc)})")
+        if not serpapi_unavailable:
             try:
-                trends_rss_signals = await _scan_google_trends_rss(query, geo_params)
-                signals.extend(trends_rss_signals)
-                if not trends_rss_signals:
-                    diagnostics.append(f"Google Trends RSS returned no matching topics for '{query}'")
-            except Exception as rss_exc:
-                diagnostics.append(f"Google Trends RSS failed for '{query}' ({str(rss_exc)})")
+                trends_params: dict[str, Any] = {"engine": "google_trends", "q": query}
+                if "geo" in geo_params:
+                    trends_params["geo"] = geo_params["geo"]
 
-        try:
-            news_params: dict[str, Any] = {"engine": "google_news", "q": query, "num": 5}
-            if "gl" in geo_params:
-                news_params["gl"] = geo_params["gl"]
-            if "hl" in geo_params:
-                news_params["hl"] = geo_params["hl"]
+                trends_payload = await _query_serpapi(trends_params)
+                trend_signals = _parse_trends(query, trends_payload)
+                signals.extend(trend_signals)
+                if not trend_signals:
+                    diagnostics.append(f"Google Trends returned no interest_over_time rows for '{query}'")
+            except SerpApiAuthError as exc:
+                serpapi_unavailable = True
+                diagnostics.append(f"SerpAPI unavailable ({str(exc)}); using free fallbacks only for this cycle")
+                await _trends_rss_fallback(query, geo_params, signals, diagnostics)
+            except Exception as exc:
+                diagnostics.append(f"Google Trends request failed for '{query}' ({str(exc)})")
+                await _trends_rss_fallback(query, geo_params, signals, diagnostics)
+        else:
+            await _trends_rss_fallback(query, geo_params, signals, diagnostics)
 
-            news_payload = await _query_serpapi(news_params)
-            news_signals = _parse_news(news_payload)
-            signals.extend(news_signals)
-            if not news_signals:
-                diagnostics.append(f"Google News returned no news_results rows for '{query}'")
-        except Exception as exc:
-            diagnostics.append(f"Google News request failed for '{query}' ({str(exc)})")
+        if not serpapi_unavailable:
             try:
-                newsapi_signals = await _scan_newsapi(query, geo_params)
-                signals.extend(newsapi_signals)
-                if not newsapi_signals:
-                    diagnostics.append(f"NewsAPI returned no articles for '{query}'")
-            except Exception as news_exc:
-                diagnostics.append(f"NewsAPI request failed for '{query}' ({str(news_exc)})")
+                news_params: dict[str, Any] = {"engine": "google_news", "q": query, "num": 5}
+                if "gl" in geo_params:
+                    news_params["gl"] = geo_params["gl"]
+                if "hl" in geo_params:
+                    news_params["hl"] = geo_params["hl"]
+
+                news_payload = await _query_serpapi(news_params)
+                news_signals = _parse_news(news_payload)
+                signals.extend(news_signals)
+                if not news_signals:
+                    diagnostics.append(f"Google News returned no news_results rows for '{query}'")
+            except SerpApiAuthError as exc:
+                serpapi_unavailable = True
+                diagnostics.append(f"SerpAPI unavailable ({str(exc)}); using free fallbacks only for this cycle")
+                await _newsapi_fallback(query, geo_params, signals, diagnostics)
+            except Exception as exc:
+                diagnostics.append(f"Google News request failed for '{query}' ({str(exc)})")
+                await _newsapi_fallback(query, geo_params, signals, diagnostics)
+        else:
+            await _newsapi_fallback(query, geo_params, signals, diagnostics)
 
         if signals:
             break
