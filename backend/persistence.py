@@ -78,7 +78,7 @@ async def _connect() -> psycopg.AsyncConnection[Any] | None:
         return None
 
     try:
-        return await psycopg.AsyncConnection.connect(conn_str, autocommit=True)
+        return await psycopg.AsyncConnection.connect(conn_str, autocommit=True, connect_timeout=5)
     except Exception:
         return None
 

@@ -22,6 +22,17 @@ Things that must never happen just because the test suite ran:
 5. A real email send via Resend (send_variant_email) or a real status poll
    (get_email_status). Free, but a test run still shouldn't spam the real
    inbox in RESEND_TEST_RECIPIENT every time the suite runs.
+6. A real, unbounded network connection attempt to Supabase
+   (_collect_channel_signals -> persistence.load_campaign_history ->
+   _connect). This one doesn't cost money, but it isn't skippable-fast like
+   the others either: market_intelligence_node calls it on every single
+   cycle, so every test that exercises that node was making a real
+   connection attempt on every run. Usually fast enough to not notice: but
+   when the network path to Supabase is slow or briefly unreachable, an
+   un-timed-out psycopg connect() blocks the event loop indefinitely,
+   hanging the whole test session (root-caused after test_03 mysteriously
+   hung whenever test_full_system.py was part of the same collection run --
+   the real trigger was just timing, not that file itself).
 
 All are patched here, autouse, for every test in the session -- individual
 tests can still add their own more specific mocks on top without conflict.
@@ -71,4 +82,10 @@ def _never_call_real_content_gen_llm():
 @pytest.fixture(autouse=True)
 def _never_send_real_email():
     with patch.object(graph_nodes, "send_variant_email", AsyncMock(side_effect=graph_nodes.ResendNotConfigured("test"))):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _never_call_real_channel_intelligence_db():
+    with patch.object(graph_nodes, "_collect_channel_signals", AsyncMock(return_value=[])):
         yield

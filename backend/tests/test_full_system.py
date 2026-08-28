@@ -39,7 +39,21 @@ from events import (
     WarningEvent,
 )
 
-client = TestClient(app)
+client: TestClient  # populated by _init_client below
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _init_client():
+    """Build TestClient at first test execution, not at collection/import
+    time. TestClient spins up its own background event-loop portal; doing
+    that during pytest's collection phase -- before pytest-asyncio's
+    per-test event loops exist -- left a stray Lock/loop reference around
+    that made an unrelated async test in a different file (test_03) hang
+    forever whenever this file was part of the same collection run, even
+    though this file's own tests never ran first alphabetically."""
+    global client
+    client = TestClient(app)
+    yield
 
 
 def _thread_id(prefix: str) -> str:

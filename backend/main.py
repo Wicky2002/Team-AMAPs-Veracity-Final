@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,10 +24,16 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 app = FastAPI(title="Vector Agents - Growth Loop API")
 
-# Allow Next.js frontend to communicate with the API
+# Allow Next.js frontend to communicate with the API. Local dev origins are
+# always allowed; the deployed frontend origin(s) come from an env var so this
+# doesn't need a code change (and redeploy) every time a preview/prod URL
+# changes.
+_local_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+_deployed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "").split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=_local_origins + _deployed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
