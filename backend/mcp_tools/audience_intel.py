@@ -133,7 +133,7 @@ def _get_apify_token() -> str:
 
 
 def _get_apify_actor() -> str:
-    return os.getenv("APIFY_REDDIT_ACTOR", "spry_wholemeal/reddit-scraper").strip() or "spry_wholemeal/reddit-scraper"
+    return os.getenv("APIFY_REDDIT_ACTOR", "johnvc/google-forums-search-api").strip() or "johnvc/google-forums-search-api"
 
 
 def _get_apify_max_items(limit_per_subreddit: int, subreddit_count: int | None = None) -> int:
@@ -164,6 +164,32 @@ def _topic_start_urls(topic: str, limit_per_subreddit: int, subreddits: tuple[st
         )
 
     return urls
+
+
+def _forum_search_query(topic: str, subreddits: tuple[str, ...] | None = None) -> str:
+    sites = " OR ".join(f"site:reddit.com/r/{subreddit}" for subreddit in (subreddits or SUBREDDITS))
+    return f"{(topic or 'AI SDR').strip() or 'AI SDR'} ({sites})"
+
+
+def _flatten_forum_pages(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # Forum search returns one item per results page with the threads under
+    # "forum_results"; turn those into one dict per Reddit thread.
+    flattened: list[dict[str, Any]] = []
+    for item in items:
+        entries = item.get("forum_results")
+        if not isinstance(entries, list):
+            flattened.append(item)
+            continue
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            match = re.search(r"reddit\.com/r/([^/?#]+)", str(entry.get("link", "")))
+            if not match:
+                continue
+            flattened.append({**entry, "subreddit": match.group(1)})
+
+    return flattened
 
 
 def _confidence_from_score(score: int | None) -> float:
@@ -544,6 +570,10 @@ def _build_apify_actor_inputs(
     subreddit_list = list(resolved_subreddits)
     start_urls = _topic_start_urls(normalized_topic, limit_per_subreddit, resolved_subreddits)
     queries = _query_variants(normalized_topic)
+    forum_input = {
+        "q": _forum_search_query(normalized_topic, resolved_subreddits),
+        "max_pages": max(1, min((max_items + 9) // 10, 5)),
+    }
 
     properties = input_schema.get("properties") if isinstance(input_schema, dict) else None
     property_names = set(properties.keys()) if isinstance(properties, dict) else set()
@@ -552,6 +582,7 @@ def _build_apify_actor_inputs(
     if not property_names:
         payloads.extend(
             [
+                forum_input,
                 {
                     "mode": "search",
                     "search": {
@@ -581,6 +612,10 @@ def _build_apify_actor_inputs(
                 },
             ]
         )
+        return _dedupe_payload_dicts(payloads)
+
+    if "q" in property_names:
+        payloads.append(forum_input)
         return _dedupe_payload_dicts(payloads)
 
     payload: dict[str, Any] = {}
@@ -679,7 +714,7 @@ def _signals_from_apify_items(items: list[dict[str, Any]], *, allowed_subreddits
                 )
             )
 
-        body = _first_str(item, ["selftext", "text", "body", "content", "description", "postText"])
+        body = _first_str(item, ["selftext", "text", "body", "content", "description", "postText", "snippet"])
         if len(body) >= 60:
             excerpt = body[:220]
             signals.append(
@@ -713,7 +748,7 @@ async def _scan_audience_intent_with_apify(topic: str, limit_per_subreddit: int)
             "Accept": "application/json",
             "User-Agent": _headers()["User-Agent"],
         },
-        timeout=60,
+        timeout=180,
         follow_redirects=True,
     ) as client:
         input_schema = await _fetch_apify_actor_schema(client, actor_id=actor_id)
@@ -750,7 +785,7 @@ async def _scan_audience_intent_with_apify(topic: str, limit_per_subreddit: int)
             if not isinstance(payload, list):
                 continue
 
-            typed_items = [item for item in payload if isinstance(item, dict)]
+            typed_items = _flatten_forum_pages([item for item in payload if isinstance(item, dict)])
             if not typed_items:
                 continue
 
